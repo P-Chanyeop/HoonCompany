@@ -4,3 +4,4 @@ __pycache__/
 *.zip
 *.tmp
 *_debug.html
+changed_passwords.txt

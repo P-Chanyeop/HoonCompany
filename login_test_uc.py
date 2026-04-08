@@ -185,16 +185,14 @@ def solve_birthday_release(driver, account):
             time.sleep(0.2)
             print(f"    ✏️ 년도 입력: {year}")
 
-        # 월 선택 (드롭다운 — value는 "01"~"12" 형식)
-        month_select = driver.find_elements(By.CSS_SELECTOR, "#birthMonth, select")
-        if month_select:
-            from selenium.webdriver.support.ui import Select
-            sel = Select(month_select[0])
-            sel.select_by_value(str(int(month)).zfill(2))
-            time.sleep(0.2)
-            print(f"    ✏️ 월 선택: {int(month)}월")
-        else:
-            print(f"    ⚠️ 월 드롭다운 못 찾음")
+        # 월 선택 (JS로 직접 — 로딩 타이밍 문제 방지)
+        month_val = str(int(month)).zfill(2)
+        driver.execute_script(f"""
+            var sel = document.getElementById('birthMonth');
+            if (sel) {{ sel.value = '{month_val}'; sel.dispatchEvent(new Event('change')); }}
+        """)
+        time.sleep(0.2)
+        print(f"    ✏️ 월 선택: {int(month)}월")
 
         # 일 입력
         day_input = driver.find_elements(By.CSS_SELECTOR, "input[placeholder*='일'], input[title*='일']")
@@ -230,12 +228,168 @@ def solve_birthday_release(driver, account):
             except:
                 continue
 
+        # 비밀번호 변경 페이지 처리
+        url3, page3 = get_page_safe(driver)
+        if "비밀번호를 변경" in page3 or "새 비밀번호" in page3:
+            new_pw = _generate_random_password()
+            print(f"    🔑 새 비밀번호 생성: {new_pw}")
+
+            # 새 비밀번호 입력
+            pw_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='password']")
+            if len(pw_inputs) >= 2:
+                pw_inputs[0].click()
+                time.sleep(0.1)
+                slow_type(pw_inputs[0], new_pw)
+                time.sleep(0.2)
+                pw_inputs[1].click()
+                time.sleep(0.1)
+                slow_type(pw_inputs[1], new_pw)
+                time.sleep(0.2)
+                print(f"    ✏️ 새 비밀번호 입력 완료")
+
+            # 자동입력 방지 문자 (최대 3회 시도)
+            for captcha_try in range(3):
+                captcha_solved = _solve_text_captcha(driver)
+                if not captcha_solved:
+                    break
+
+                print(f"    🤖 자동입력 방지 문자 입력 완료 (시도 {captcha_try + 1}/3)")
+
+                # 확인 버튼 클릭
+                for btn in driver.find_elements(By.CSS_SELECTOR, "button, a, input[type='submit']"):
+                    try:
+                        if btn.text.strip() == "확인":
+                            btn.click()
+                            time.sleep(3)
+                            break
+                    except:
+                        continue
+
+                # 결과 확인
+                url4, page4 = get_page_safe(driver)
+                if "잘못된 자동입력" in page4 or "다시 입력" in page4:
+                    print(f"    ❌ 자동입력 방지 문자 틀림 (시도 {captcha_try + 1}/3)")
+                    continue
+                else:
+                    break  # 성공 또는 다음 페이지로 이동
+
+            # 2단계 인증 설정 페이지 → "나중에 하기" 클릭
+            time.sleep(2)
+            url5, page5 = get_page_safe(driver)
+            if "2단계 인증" in page5 or "나중에 하기" in page5:
+                for btn in driver.find_elements(By.CSS_SELECTOR, "button, a"):
+                    try:
+                        if "나중에 하기" in btn.text.strip():
+                            btn.click()
+                            print(f"    ⏭️ 2단계 인증 → 나중에 하기 클릭")
+                            time.sleep(2)
+                            break
+                    except:
+                        continue
+
+            # 비밀번호 변경 결과 저장
+            _save_new_password(account["id"], new_pw)
+            print(f"    💾 비밀번호 저장: changed_passwords.txt")
+            account["pw"] = new_pw
+
+            # 바뀐 비밀번호로 다시 로그인
+            url6, page6 = get_page_safe(driver)
+            if "nidlogin" in url6 or "로그인" in page6:
+                print(f"    🔄 바뀐 비밀번호로 재로그인 시도...")
+                driver.switch_to.window(driver.current_window_handle)
+                driver.execute_script("window.focus();")
+                time.sleep(0.2)
+                id_input = driver.find_element(By.CSS_SELECTOR, "#id")
+                id_input.click()
+                time.sleep(0.1)
+                slow_type(id_input, account["id"])
+                time.sleep(0.2)
+                pw_input = driver.find_element(By.CSS_SELECTOR, "#pw")
+                pw_input.click()
+                time.sleep(0.1)
+                slow_type(pw_input, new_pw)
+                time.sleep(0.2)
+                driver.find_element(By.CSS_SELECTOR, ".btn_login").click()
+                time.sleep(3)
+                url7, page7 = get_page_safe(driver)
+                if "nid.naver.com" not in url7 and "nidlogin" not in url7:
+                    print(f"    ✅ 재로그인 성공!")
+
         print(f"    📋 생년월일 해제 완료: {name} / {gender} / {birth}")
         return True
 
     except Exception as e:
         print(f"    ⚠️ 생년월일 입력 실패: {str(e)[:60]}")
         return False
+
+
+def _generate_random_password():
+    """랜덤 비밀번호 생성 (영문+숫자+특수문자, 10~14자)."""
+    import string
+    length = random.randint(10, 14)
+    chars = string.ascii_letters + string.digits
+    specials = "!@#$%"
+    # 최소 1개씩 보장
+    pw = [
+        random.choice(string.ascii_uppercase),
+        random.choice(string.ascii_lowercase),
+        random.choice(string.digits),
+        random.choice(specials),
+    ]
+    pw += [random.choice(chars + specials) for _ in range(length - 4)]
+    random.shuffle(pw)
+    return "".join(pw)
+
+
+def _solve_text_captcha(driver):
+    """자동입력 방지 문자 이미지를 Gemini로 풀기."""
+    if not GEMINI_API_KEY:
+        return False
+    try:
+        # 캡차 이미지 찾기
+        captcha_imgs = driver.find_elements(By.CSS_SELECTOR, "img[src*='captcha'], img.captcha_img, #captchaimg")
+        if not captcha_imgs:
+            return False
+
+        img_b64 = captcha_imgs[0].screenshot_as_base64
+
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-2.5-pro")
+
+        import PIL.Image
+        import io
+        img_bytes = base64.b64decode(img_b64)
+        img = PIL.Image.open(io.BytesIO(img_bytes))
+
+        prompt = """이 이미지에 보이는 텍스트/문자를 정확히 읽어주세요.
+왜곡된 글자입니다. 보이는 영문자와 숫자만 정확히 답해주세요.
+설명 없이 문자만 답하세요."""
+
+        response = model.generate_content([prompt, img])
+        answer = response.text.strip()
+        answer_clean = re.sub(r'[^a-zA-Z0-9]', '', answer)
+        print(f"    🤖 캡차 문자 인식: '{answer}' → '{answer_clean}'")
+
+        # 입력
+        captcha_input = driver.find_elements(By.CSS_SELECTOR, "#autoValue")
+        if not captcha_input:
+            captcha_input = driver.find_elements(By.CSS_SELECTOR, "input[name='autoValue'], input[placeholder*='자동입력']")
+        if captcha_input:
+            captcha_input[0].click()
+            time.sleep(0.1)
+            slow_type(captcha_input[0], answer_clean)
+            return True
+    except Exception as e:
+        print(f"    ⚠️ 텍스트 캡차 풀기 실패: {str(e)[:60]}")
+    return False
+
+
+def _save_new_password(nid, new_pw):
+    """변경된 비밀번호를 파일에 저장."""
+    filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "changed_passwords.txt")
+    with open(filepath, "a", encoding="utf-8") as f:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        f.write(f"{nid}\t{new_pw}\t{ts}\n")
 
 def click_release_button(driver):
     """보호조치 해제 / 이용제한 해제 버튼 찾아서 클릭."""
@@ -394,6 +548,11 @@ def login_with_driver(worker_id, account, driver):
         time.sleep(1)
         dismiss_alert(driver)
 
+        # 창 포커스 가져오기
+        driver.switch_to.window(driver.current_window_handle)
+        driver.execute_script("window.focus();")
+        time.sleep(0.2)
+
         # ID/PW 입력 — 사람처럼 타이핑
         id_input = driver.find_element(By.CSS_SELECTOR, "#id")
         id_input.click()
@@ -494,6 +653,7 @@ def main():
     parser.add_argument("--account-file", default="", help="계정 파일 (구글시트 우선)")
     parser.add_argument("proxy_file", help="프록시 파일")
     parser.add_argument("--workers", type=int, default=50, help="워커 수 (기본: 50)")
+    parser.add_argument("--only", default="", help="특정 ID만 실행 (쉼표 구분, 예: aotmnurz1389,buryut)")
     parser.add_argument("--gemini-key", default="", help="Gemini API 키 (캡차 풀기용)")
     args = parser.parse_args()
 
@@ -511,6 +671,10 @@ def main():
                 log(f"config.ini에서 Gemini API 키 로드 완료")
 
     accounts = load_accounts(args.account_file)
+    if args.only:
+        only_ids = [x.strip() for x in args.only.split(",")]
+        accounts = [a for a in accounts if a["id"] in only_ids]
+        log(f"--only 필터: {only_ids} → {len(accounts)}개 계정")
     proxies = load_proxies(args.proxy_file)
     random.shuffle(proxies)
     log(f"계정 {len(accounts)}개 / 프록시 {len(proxies)}개 로드 (랜덤 배정)")
