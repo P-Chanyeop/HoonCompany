@@ -596,20 +596,10 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
         # iframe으로 전환 (네이버 카페는 cafe_main iframe 안에 콘텐츠가 있음)
         try:
             iframe = driver.find_element(By.CSS_SELECTOR, "iframe#cafe_main")
-            driver.switch_to.frame(iframe)
             _log("cafe_main iframe 전환")
             time.sleep(1)
         except:
             _log("iframe 없음 - 메인 프레임에서 진행")
-
-        # iframe 전환
-        try:
-            iframe = driver.find_element(By.CSS_SELECTOR, "iframe#cafe_main")
-            driver.switch_to.frame(iframe)
-            _log("cafe_main iframe 전환")
-            time.sleep(1)
-        except:
-            _log("iframe 없음")
 
         # 나의활동 JS 호출
         try:
@@ -618,7 +608,6 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
             _log("나의활동 호출 성공")
         except:
             _log("나의활동 실패")
-            driver.switch_to.default_content()
             return {"my_grade": -1, "my_grade_text": "", "grades": {}}
 
         # 등급 안내 JS 호출
@@ -629,7 +618,6 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
             _log("등급 안내 호출 성공")
         except:
             _log("등급 안내 실패")
-            driver.switch_to.default_content()
             return {"my_grade": -1, "my_grade_text": "", "grades": {}}
 
         # 새 창 전환 (최대 5초 대기)
@@ -673,23 +661,12 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
             if original_handle:
                 driver.switch_to.window(original_handle[0])
 
-        # iframe에서 빠져나오기
-        try:
-            driver.switch_to.default_content()
-        except:
-            pass
-
         _log(f"등급 조회 완료: {len(grade_info['grades'])}개 등급")
         return grade_info
 
     except Exception as e:
         _log(f"등급 조회 실패: {str(e)[:60]}")
-        try:
-            driver.switch_to.default_content()
-        except:
-            pass
         return {"my_grade": -1, "my_grade_text": "", "grades": {}}
-
 
 
 def visit_cafe(driver, account, log_fn=None):
