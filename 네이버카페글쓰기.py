@@ -441,8 +441,6 @@ class LoginWorkerThread(QThread):
         self._stop_flag = True
 
     def run(self):
-        import random
-        random.shuffle(self.proxies)
         count = min(self.worker_count, len(self.accounts), len(self.proxies))
 
         for i in range(count):
@@ -792,16 +790,27 @@ class CafeWriterTab(QWidget):
 
         wc = self.worker_slider.value()
         count = min(wc, len(accounts), len(proxies))
+
+        # 프록시 셔플
+        import random
+        random.shuffle(proxies)
+
         self.worker_table.setRowCount(count)
         for i in range(count):
+            acc = accounts[i]
+            proxy = proxies[i]
+            cafe = acc.get("cafe_url", "-")
+            cafe_short = cafe.replace("https://cafe.naver.com/", "") if cafe else "-"
+            menu = acc.get("menu_id", "") or "자동탐색"
+
             self.worker_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-            self.worker_table.setItem(i, 1, QTableWidgetItem(accounts[i]["id"]))
-            self.worker_table.setItem(i, 2, QTableWidgetItem("-"))
+            self.worker_table.setItem(i, 1, QTableWidgetItem(acc["id"]))
+            self.worker_table.setItem(i, 2, QTableWidgetItem(proxy[:20]))
             item = QTableWidgetItem("대기중")
             item.setForeground(QColor("#b08800"))
             self.worker_table.setItem(i, 3, item)
-            self.worker_table.setItem(i, 4, QTableWidgetItem("-"))
-            self.worker_table.setItem(i, 5, QTableWidgetItem("-"))
+            self.worker_table.setItem(i, 4, QTableWidgetItem(cafe_short))
+            self.worker_table.setItem(i, 5, QTableWidgetItem(menu))
             self.worker_table.setItem(i, 6, QTableWidgetItem("-"))
 
         self.lbl_summary.setText(f"성공 0 | 생년월일 0 | 핸드폰 0 | 영구정지 0 | 캡차 0 | 보안인증 0 | 실패 0 / 총 {count}개")
