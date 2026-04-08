@@ -7,6 +7,8 @@ SOFTCAT | SC-2026-0401-CF
 """
 
 import sys
+import os
+import configparser
 from datetime import datetime
 
 from PyQt6.QtWidgets import (
@@ -18,8 +20,10 @@ from PyQt6.QtWidgets import (
     QSplitter, QFrame, QFileDialog, QMessageBox,
     QProgressBar, QAbstractItemView, QScrollArea
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QColor
+
+import func
 
 
 # ─────────────────────────────────────────────
@@ -315,7 +319,174 @@ class RangeSliderPair(QWidget):
         self.slider_hi.valueChanged.connect(lambda v: self.lbl_hi.setText(str(v)))
 
 
+
 # ─────────────────────────────────────────────
+# 설정 탭
+# ─────────────────────────────────────────────
+class SettingsTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        self._init_ui()
+        self._load_config()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        # ── 프록시 설정 ──
+        proxy_group = QGroupBox("프록시 설정")
+        pg = QGridLayout(proxy_group)
+        pg.addWidget(QLabel("프록시 파일:"), 0, 0)
+        self.proxy_file_edit = QLineEdit()
+        self.proxy_file_edit.setPlaceholderText("프록시 파일 경로 (IP:PORT 형식)")
+        pg.addWidget(self.proxy_file_edit, 0, 1)
+        btn_proxy = QPushButton("찾기")
+        btn_proxy.setProperty("class", "secondary")
+        btn_proxy.setFixedWidth(60)
+        btn_proxy.clicked.connect(lambda: self._browse_file(self.proxy_file_edit, "텍스트 (*.txt)"))
+        pg.addWidget(btn_proxy, 0, 2)
+        layout.addWidget(proxy_group)
+
+        # ── 구글시트 설정 ──
+        gs_group = QGroupBox("구글시트 연동")
+        gsg = QGridLayout(gs_group)
+        gsg.addWidget(QLabel("API 키:"), 0, 0)
+        self.gs_api_key = QLineEdit()
+        self.gs_api_key.setPlaceholderText("Google Sheets API 키")
+        self.gs_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        gsg.addWidget(self.gs_api_key, 0, 1)
+        gsg.addWidget(QLabel("시트 ID:"), 1, 0)
+        self.gs_sheet_id = QLineEdit()
+        self.gs_sheet_id.setPlaceholderText("스프레드시트 ID (URL에서 /d/ 뒤의 값)")
+        gsg.addWidget(self.gs_sheet_id, 1, 1)
+        layout.addWidget(gs_group)
+
+        # ── Gemini 설정 ──
+        gemini_group = QGroupBox("Gemini AI 설정")
+        gg = QGridLayout(gemini_group)
+        gg.addWidget(QLabel("API 키:"), 0, 0)
+        self.gemini_api_key = QLineEdit()
+        self.gemini_api_key.setPlaceholderText("Gemini API 키")
+        self.gemini_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        gg.addWidget(self.gemini_api_key, 0, 1)
+        gg.addWidget(QLabel("모델:"), 1, 0)
+        self.gemini_model = QComboBox()
+        self.gemini_model.addItems(["gemini-2.5-pro", "gemini-2.5-flash"])
+        gg.addWidget(self.gemini_model, 1, 1)
+        layout.addWidget(gemini_group)
+
+        # ── 하이아이피 설정 ──
+        # (삭제됨 — 필요 없음)
+
+        # ── 저장 버튼 ──
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_save = QPushButton("💾  설정 저장")
+        btn_save.setMinimumHeight(38)
+        btn_save.setMinimumWidth(150)
+        btn_save.clicked.connect(self._save_config)
+        btn_layout.addWidget(btn_save)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
+        layout.addStretch()
+
+    def _browse_file(self, target, filt="모든 파일 (*.*)"):
+        path, _ = QFileDialog.getOpenFileName(self, "파일 선택", "", filt)
+        if path:
+            target.setText(path)
+
+    def _config_path(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
+
+    def _load_config(self):
+        cfg = configparser.ConfigParser()
+        cfg.read(self._config_path(), encoding="utf-8")
+        self.gs_api_key.setText(cfg.get("google_sheets", "api_key", fallback=""))
+        self.gs_sheet_id.setText(cfg.get("google_sheets", "sheet_id", fallback=""))
+        self.gemini_api_key.setText(cfg.get("gemini", "api_key", fallback=""))
+        self.proxy_file_edit.setText(cfg.get("paths", "proxy_file", fallback=""))
+
+    def _save_config(self):
+        cfg = configparser.ConfigParser()
+        cfg["gemini"] = {"api_key": self.gemini_api_key.text()}
+        cfg["google_sheets"] = {"api_key": self.gs_api_key.text(), "sheet_id": self.gs_sheet_id.text()}
+        cfg["paths"] = {"proxy_file": self.proxy_file_edit.text()}
+        with open(self._config_path(), "w", encoding="utf-8") as f:
+            cfg.write(f)
+        QMessageBox.information(self, "저장 완료", "설정이 config.ini에 저장되었습니다.")
+
+# ─────────────────────────────────────────────
+
+# ─────────────────────────────────────────────
+# 로그인 워커 스레드
+# ─────────────────────────────────────────────
+class LoginWorkerThread(QThread):
+    """순차적으로 계정 로그인을 수행하는 워커 스레드."""
+    log_signal = pyqtSignal(str)
+    worker_update = pyqtSignal(int, str, str, str, str)  # idx, account, proxy, status, detail
+    finished_signal = pyqtSignal(list)  # results
+
+    def __init__(self, accounts, proxies, worker_count):
+        super().__init__()
+        self.accounts = accounts
+        self.proxies = proxies
+        self.worker_count = worker_count
+        self.drivers = []
+        self.results = []
+        self._stop_flag = False
+
+    def stop(self):
+        self._stop_flag = True
+
+    def run(self):
+        import random
+        random.shuffle(self.proxies)
+        count = min(self.worker_count, len(self.accounts), len(self.proxies))
+
+        for i in range(count):
+            if self._stop_flag:
+                break
+
+            acc = self.accounts[i]
+            proxy = self.proxies[i]
+            nid = acc["id"]
+
+            self.log_signal.emit(f"워커#{i+1} 🔌 프록시={proxy} / ID={nid}")
+            self.worker_update.emit(i, nid, proxy, "로그인 중...", "-")
+
+            try:
+                driver = func.create_driver(proxy, i)
+                log_fn = lambda msg, _i=i: self.log_signal.emit(f"  워커#{_i+1} {msg}")
+                result = func.naver_login(driver, acc, log_fn)
+                result["worker"] = i
+                result["id"] = nid
+                self.results.append(result)
+
+                status = "✅ 성공" if result["ok"] else f"❌ {result.get('error', 'fail')}"
+                self.worker_update.emit(i, nid, proxy, status, result["msg"][:30])
+                self.log_signal.emit(f"워커#{i+1} {'✅' if result['ok'] else '❌'} [{nid}] {result['msg']}")
+
+                # 실패한 창 닫기 (성공/생년월일은 유지)
+                if result.get("error") in ("blocked_phone", "permanent_ban", "login_fail", "exception"):
+                    try:
+                        driver.quit()
+                    except:
+                        pass
+                else:
+                    self.drivers.append((i, driver))
+
+            except Exception as e:
+                self.log_signal.emit(f"워커#{i+1} ❌ [{nid}] {str(e)[:60]}")
+                self.worker_update.emit(i, nid, proxy, "❌ 에러", str(e)[:30])
+
+        # 결과 집계
+        ok = len([r for r in self.results if r["ok"]])
+        total = len(self.results)
+        self.log_signal.emit(f"=== 완료: 성공 {ok}/{total} ===")
+        self.finished_signal.emit(self.results)
+
 # 1순위: 카페 글쓰기 탭 (좌우 스플리터 구조 유지)
 # ─────────────────────────────────────────────
 class CafeWriterTab(QWidget):
@@ -338,74 +509,13 @@ class CafeWriterTab(QWidget):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(8)
 
-        # ── 계정 / 프록시 설정 ──
-        account_group = QGroupBox("계정 / 프록시 설정")
-        ag = QGridLayout(account_group)
-
-        ag.addWidget(QLabel("계정 파일:"), 0, 0)
-        self.account_file_edit = QLineEdit()
-        self.account_file_edit.setPlaceholderText("accounts.txt (ID:PW 형식)")
-        ag.addWidget(self.account_file_edit, 0, 1)
-        btn_acc = QPushButton("찾기")
-        btn_acc.setProperty("class", "secondary")
-        btn_acc.setFixedWidth(60)
-        btn_acc.clicked.connect(lambda: self._browse_file(self.account_file_edit))
-        ag.addWidget(btn_acc, 0, 2)
-
-        ag.addWidget(QLabel("프록시:"), 1, 0)
-        self.proxy_edit = QLineEdit()
-        self.proxy_edit.setPlaceholderText("IP:PORT:USER:PW 또는 파일 경로")
-        ag.addWidget(self.proxy_edit, 1, 1)
-        proxy_btn_layout = QHBoxLayout()
-        btn_ptxt = QPushButton("TXT")
-        btn_ptxt.setProperty("class", "secondary")
-        btn_ptxt.setFixedWidth(40)
-        btn_ptxt.clicked.connect(lambda: self._browse_file(self.proxy_edit, "텍스트 (*.txt)"))
-        proxy_btn_layout.addWidget(btn_ptxt)
-        btn_pclear = QPushButton("X")
-        btn_pclear.setProperty("class", "danger")
-        btn_pclear.setFixedWidth(28)
-        btn_pclear.clicked.connect(self.proxy_edit.clear)
-        proxy_btn_layout.addWidget(btn_pclear)
-        ag.addLayout(proxy_btn_layout, 1, 2)
-
-        ag.addWidget(QLabel("워커 수:"), 2, 0)
+        # ── 워커 설정 ──
+        worker_group = QGroupBox("워커 설정")
+        wkg = QGridLayout(worker_group)
+        wkg.addWidget(QLabel("워커 수:"), 0, 0)
         self.worker_slider = LabeledSlider(1, 60, 50)
-        ag.addWidget(self.worker_slider, 2, 1, 1, 2)
-
-        left_layout.addWidget(account_group)
-
-        # ── 구글시트 연동 ──
-        gsheet_group = QGroupBox("구글시트 연동")
-        gg = QGridLayout(gsheet_group)
-
-        gg.addWidget(QLabel("시트 URL:"), 0, 0)
-        self.gsheet_url = QLineEdit()
-        self.gsheet_url.setPlaceholderText("https://docs.google.com/spreadsheets/d/...")
-        gg.addWidget(self.gsheet_url, 0, 1, 1, 2)
-
-        gg.addWidget(QLabel("인증키 파일:"), 1, 0)
-        self.gsheet_cred = QLineEdit()
-        self.gsheet_cred.setPlaceholderText("credentials.json")
-        gg.addWidget(self.gsheet_cred, 1, 1)
-        btn_cred = QPushButton("찾기")
-        btn_cred.setProperty("class", "secondary")
-        btn_cred.setFixedWidth(60)
-        btn_cred.clicked.connect(lambda: self._browse_file(self.gsheet_cred))
-        gg.addWidget(btn_cred, 1, 2)
-
-        gg.addWidget(QLabel("키워드 시트:"), 2, 0)
-        self.keyword_sheet = QLineEdit("키워드")
-        gg.addWidget(self.keyword_sheet, 2, 1)
-        btn_sync = QPushButton("시트 동기화")
-        btn_sync.setProperty("class", "secondary")
-        gg.addWidget(btn_sync, 2, 2)
-
-        gg.addWidget(QLabel("원고 시트:"), 3, 0)
-        self.content_sheet = QLineEdit("원고")
-        gg.addWidget(self.content_sheet, 3, 1)
-
-        left_layout.addWidget(gsheet_group)
+        wkg.addWidget(self.worker_slider, 0, 1, 1, 2)
+        left_layout.addWidget(worker_group)
 
         # ── 원고 폴더 ──
         content_group = QGroupBox("원고 관리")
@@ -417,7 +527,7 @@ class CafeWriterTab(QWidget):
         cg.addWidget(self.content_folder, 0, 1)
         btn_folder = QPushButton("폴더 선택")
         btn_folder.setProperty("class", "secondary")
-        btn_folder.setFixedWidth(70)
+        btn_folder.setFixedWidth(80)
         btn_folder.clicked.connect(self._browse_folder)
         cg.addWidget(btn_folder, 0, 2)
         self.lbl_content_count = QLabel("원고: 0개")
@@ -504,8 +614,8 @@ class CafeWriterTab(QWidget):
 
         left_layout.addWidget(grade_group)
 
-        # ── 보조조치 / API 설정 ──
-        aux_group = QGroupBox("보조조치 해제 / API 설정")
+        # ── 보조조치 설정 ──
+        aux_group = QGroupBox("보조조치 / 카페 설정")
         auxg = QGridLayout(aux_group)
 
         self.chk_auto_unblock = QCheckBox("보조조치 자동 해제")
@@ -519,27 +629,6 @@ class CafeWriterTab(QWidget):
         self.chk_grade_check = QCheckBox("등급 체크 후 글쓰기 (게시판 자동 탐색)")
         self.chk_grade_check.setChecked(True)
         auxg.addWidget(self.chk_grade_check, 2, 0, 1, 2)
-
-        auxg.addWidget(QLabel("Gemini API Key:"), 3, 0)
-        self.gemini_key = QLineEdit()
-        self.gemini_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.gemini_key.setPlaceholderText("Gemini API 키")
-        auxg.addWidget(self.gemini_key, 3, 1)
-
-        auxg.addWidget(QLabel("Gemini 모델:"), 4, 0)
-        self.gemini_model = QComboBox()
-        self.gemini_model.addItems([
-            "gemini-2.0-flash",
-            "gemini-2.5-flash-preview",
-            "gemini-2.5-pro-preview",
-        ])
-        auxg.addWidget(self.gemini_model, 4, 1)
-
-        auxg.addWidget(QLabel("2Captcha API Key:"), 5, 0)
-        self.captcha_key = QLineEdit()
-        self.captcha_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.captcha_key.setPlaceholderText("2Captcha API 키")
-        auxg.addWidget(self.captcha_key, 5, 1)
 
         left_layout.addWidget(aux_group)
 
@@ -678,8 +767,22 @@ class CafeWriterTab(QWidget):
         self.log_area.appendPlainText(f"[{ts}] {msg}")
 
     def _on_start(self):
-        if not self.account_file_edit.text().strip():
-            QMessageBox.warning(self, "알림", "계정 파일을 선택해주세요.")
+        # 구글시트에서 계정 로드
+        self._log("구글시트에서 계정 로드 중...")
+        accounts = func.load_accounts_from_gsheet()
+        if not accounts:
+            QMessageBox.warning(self, "알림", "구글시트에서 계정을 불러올 수 없습니다.")
+            return
+
+        # 프록시 로드 (config.ini에서)
+        cfg = func.load_config()
+        proxy_path = cfg.get("paths", "proxy_file", fallback="")
+        if not proxy_path or not os.path.isfile(proxy_path):
+            QMessageBox.warning(self, "알림", "설정 탭에서 프록시 파일을 설정해주세요.")
+            return
+        proxies = func.load_proxies(proxy_path)
+        if not proxies:
+            QMessageBox.warning(self, "알림", "프록시 파일이 비어있습니다.")
             return
 
         self.btn_start.setEnabled(False)
@@ -687,11 +790,12 @@ class CafeWriterTab(QWidget):
         self.btn_stop.setEnabled(True)
 
         wc = self.worker_slider.value()
-        self.worker_table.setRowCount(wc)
-        for i in range(wc):
+        count = min(wc, len(accounts), len(proxies))
+        self.worker_table.setRowCount(count)
+        for i in range(count):
             self.worker_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-            self.worker_table.setItem(i, 1, QTableWidgetItem(f"account_{i+1}"))
-            self.worker_table.setItem(i, 2, QTableWidgetItem(f"proxy_{i+1}"))
+            self.worker_table.setItem(i, 1, QTableWidgetItem(accounts[i]["id"]))
+            self.worker_table.setItem(i, 2, QTableWidgetItem("-"))
             item = QTableWidgetItem("대기중")
             item.setForeground(QColor("#b08800"))
             self.worker_table.setItem(i, 3, item)
@@ -699,28 +803,54 @@ class CafeWriterTab(QWidget):
             self.worker_table.setItem(i, 5, QTableWidgetItem("-"))
             self.worker_table.setItem(i, 6, QTableWidgetItem("-"))
 
-        self.lbl_total.setText(f"전체: {wc}")
-        self.lbl_running.setText(f"실행: {wc}")
-        self.progress.setMaximum(100)
+        self.lbl_total.setText(f"전체: {count}")
+        self.lbl_running.setText(f"실행: 0")
+        self.progress.setMaximum(count)
         self.progress.setValue(0)
 
-        mode = self.write_mode.currentText()
-        checked = [n for n, cb in self.grade_checks.items() if cb.isChecked()]
-        plo = self.page_lo.value()
-        phi = self.page_hi.value()
-        dlo = self.delay_lo.value()
-        dhi = self.delay_hi.value()
+        self._log(f"작업 시작 — 계정 {len(accounts)}개 / 프록시 {len(proxies)}개 / 워커 {count}개")
 
-        self._log(f"작업 시작 — 워커 {wc}개 / 모드: {mode}")
-        self._log(f"페이지 {plo}~{phi} / 딜레이 {dlo}~{dhi}초")
-        self._log(f"답글 등급: {', '.join(checked)}")
-        self._log(f"댓글허용: {self.chk_allow_comment.isChecked()} / 보조조치 자동해제: {self.chk_auto_unblock.isChecked()}")
+        # 워커 스레드 시작
+        self._worker_thread = LoginWorkerThread(accounts, proxies, count)
+        self._worker_thread.log_signal.connect(self._log)
+        self._worker_thread.worker_update.connect(self._update_worker_table)
+        self._worker_thread.finished_signal.connect(self._on_finished)
+        self._worker_thread.start()
 
-    def _on_stop(self):
+    def _update_worker_table(self, idx, account, proxy, status, detail):
+        self.worker_table.setItem(idx, 1, QTableWidgetItem(account))
+        self.worker_table.setItem(idx, 2, QTableWidgetItem(proxy[:20]))
+        item = QTableWidgetItem(status)
+        if "✅" in status:
+            item.setForeground(QColor("#2e7d32"))
+        elif "❌" in status:
+            item.setForeground(QColor("#c62828"))
+        else:
+            item.setForeground(QColor("#b08800"))
+        self.worker_table.setItem(idx, 3, item)
+        self.worker_table.setItem(idx, 6, QTableWidgetItem(detail))
+        self.progress.setValue(self.progress.value() + 1)
+        ok_count = len([r for r in self._worker_thread.results if r.get("ok")])
+        self.lbl_success.setText(f"성공: {ok_count}")
+        self.lbl_running.setText(f"실행: {self.progress.value()}")
+
+    def _on_finished(self, results):
+        ok = len([r for r in results if r["ok"]])
+        fail = len(results) - ok
+        self._log(f"=== 전체 완료: 성공 {ok} / 실패 {fail} / 총 {len(results)} ===")
         self.btn_start.setEnabled(True)
         self.btn_pause.setEnabled(False)
         self.btn_stop.setEnabled(False)
-        self._log("작업 중지됨")
+        self.lbl_success.setText(f"성공: {ok}")
+        self.lbl_fail.setText(f"실패: {fail}")
+
+    def _on_stop(self):
+        if hasattr(self, '_worker_thread') and self._worker_thread.isRunning():
+            self._worker_thread.stop()
+            self._log("중지 요청됨... 현재 워커 완료 후 중지됩니다.")
+        self.btn_start.setEnabled(True)
+        self.btn_pause.setEnabled(False)
+        self.btn_stop.setEnabled(False)
 
 
 # ─────────────────────────────────────────────
@@ -848,6 +978,7 @@ class MainWindow(QMainWindow):
             ["카페 가입 양식 자동 인식 및 입력", "가입 질문 Gemini 자동 응답",
              "다수 계정 일괄 가입 처리", "멀티워커 병렬 처리 (프록시 연동)", "가입 결과 구글시트 기록"],
             "1,000,000원", "7 영업일"), "6. 카페 가입")
+        tabs.addTab(SettingsTab(), "⚙ 설정")
 
         ml.addWidget(tabs)
         self.statusBar().showMessage("준비됨  |  SOFTCAT © 2026  |  HOON COMPANY 귀하")

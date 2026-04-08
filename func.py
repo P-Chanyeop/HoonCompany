@@ -1,483 +1,530 @@
 """
 func.py — 네이버 카페 자동화 핵심 함수 모음
 SOFTCAT | SC-2026-0401-CF
-
-※ CSS 셀렉터, 카페 URL, API 키 등 사용자 환경에 따라 달라지는 값은
-  주석에 '# 수동 입력 필요' 로 표시되어 있습니다. 직접 확인 후 수정하세요.
 """
 
 import os
 import re
+import sys
 import time
+import random
+import base64
+import string
 import logging
-from typing import Optional
+import configparser
+from datetime import datetime
+from typing import Optional, Callable
 
-import requests
-from selenium import webdriver
+import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-
-import gspread
-from google.oauth2.service_account import Credentials
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.alert import Alert
+import pyperclip
 import google.generativeai as genai
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s — %(message)s")
 logger = logging.getLogger(__name__)
 
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
+
 
 # ═══════════════════════════════════════════════
-# 1. 계정 / 프록시 로드
+# 설정 로드
 # ═══════════════════════════════════════════════
 
-def load_accounts(filepath: str) -> list[dict]:
-    """계정 파일(ID:PW) 로드. 한 줄에 ID:PW 형식."""
-    accounts = []
+def load_config():
+    cfg = configparser.ConfigParser()
+    cfg.read(CONFIG_PATH, encoding="utf-8")
+    return cfg
+
+
+def get_gemini_key():
+    cfg = load_config()
+    return cfg.get("gemini", "api_key", fallback="").strip()
+
+
+# ═══════════════════════════════════════════════
+# 구글시트에서 계정 로드
+# ═══════════════════════════════════════════════
+
+def load_accounts_from_gsheet():
+    """구글시트에서 계정 로드 (A:아이디, B:비밀번호, C:성함, D:생년월일, E:성별)"""
+    cfg = load_config()
+    gs_key = cfg.get("google_sheets", "api_key", fallback="")
+    gs_id = cfg.get("google_sheets", "sheet_id", fallback="")
+    if not gs_key or not gs_id:
+        return []
+    try:
+        from googleapiclient.discovery import build
+        service = build('sheets', 'v4', developerKey=gs_key)
+        result = service.spreadsheets().values().get(
+            spreadsheetId=gs_id, range='A2:H1000'
+        ).execute()
+        accounts = []
+        for row in result.get('values', []):
+            if len(row) >= 2:
+                accounts.append({
+                    "id": row[0].strip(),
+                    "pw": row[1].strip(),
+                    "name": row[2].strip() if len(row) > 2 else "",
+                    "birth": row[3].strip() if len(row) > 3 else "",
+                    "gender": row[4].strip() if len(row) > 4 else "",
+                    "cafe_urls": row[7].strip() if len(row) > 7 else "",
+                })
+        logger.info(f"구글시트에서 {len(accounts)}개 계정 로드")
+        return accounts
+    except Exception as e:
+        logger.error(f"구글시트 로드 실패: {e}")
+        return []
+
+
+# ═══════════════════════════════════════════════
+# 프록시 로드
+# ═══════════════════════════════════════════════
+
+def load_proxies(filepath):
+    proxies = []
     with open(filepath, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split(":", 1)
-            if len(parts) == 2:
-                accounts.append({"id": parts[0].strip(), "pw": parts[1].strip()})
-    logger.info(f"계정 {len(accounts)}개 로드 완료")
-    return accounts
-
-
-def load_proxies(proxy_input: str) -> list[str]:
-    """
-    프록시 로드. 파일 경로(.txt)이면 파일에서, 아니면 단일 프록시 문자열로 처리.
-    형식: IP:PORT 또는 IP:PORT:USER:PW
-    """
-    if os.path.isfile(proxy_input):
-        proxies = []
-        with open(proxy_input, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    proxies.append(line)
-        logger.info(f"프록시 {len(proxies)}개 로드 완료")
-        return proxies
-    elif proxy_input.strip():
-        return [proxy_input.strip()]
-    return []
-
-
-def parse_proxy(proxy_str: str) -> dict:
-    """프록시 문자열을 selenium/requests 용 dict로 변환."""
-    parts = proxy_str.split(":")
-    if len(parts) == 4:
-        ip, port, user, pw = parts
-        url = f"http://{user}:{pw}@{ip}:{port}"
-    elif len(parts) == 2:
-        ip, port = parts
-        url = f"http://{ip}:{port}"
-    else:
-        raise ValueError(f"프록시 형식 오류: {proxy_str}")
-    return {"http": url, "https": url}
+            if line and not line.startswith("#"):
+                proxies.append(line)
+    return proxies
 
 
 # ═══════════════════════════════════════════════
-# 2. 브라우저(Selenium) 생성
+# 유틸
 # ═══════════════════════════════════════════════
 
-def create_driver(proxy: Optional[str] = None, headless: bool = True) -> webdriver.Chrome:
-    """Chrome WebDriver 생성. 프록시는 IP:PORT 또는 IP:PORT:USER:PW 형식."""
-    opts = Options()
-    if headless:
-        opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-    opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-    if proxy:
-        p = parse_proxy(proxy)
-        opts.add_argument(f"--proxy-server={p['http']}")
-    driver = webdriver.Chrome(options=opts)
+def slow_type(element, text):
+    """사람처럼 한 글자씩 랜덤 딜레이로 타이핑."""
+    for ch in text:
+        element.send_keys(ch)
+        time.sleep(0.05 + 0.05 * (hash(ch) % 3))
+
+
+def dismiss_alert(driver):
+    try:
+        Alert(driver).accept()
+        time.sleep(0.5)
+    except:
+        pass
+
+
+def get_page_safe(driver):
+    dismiss_alert(driver)
+    try:
+        return driver.current_url, driver.page_source[:5000]
+    except:
+        dismiss_alert(driver)
+        return driver.current_url, driver.page_source[:5000]
+
+
+def generate_random_password():
+    length = random.randint(10, 14)
+    chars = string.ascii_letters + string.digits
+    specials = "!@#$%"
+    pw = [
+        random.choice(string.ascii_uppercase),
+        random.choice(string.ascii_lowercase),
+        random.choice(string.digits),
+        random.choice(specials),
+    ]
+    pw += [random.choice(chars + specials) for _ in range(length - 4)]
+    random.shuffle(pw)
+    return "".join(pw)
+
+
+def save_new_password(nid, new_pw):
+    filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "changed_passwords.txt")
+    with open(filepath, "a", encoding="utf-8") as f:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        f.write(f"{nid}\t{new_pw}\t{ts}\n")
+
+
+# ═══════════════════════════════════════════════
+# 브라우저 생성
+# ═══════════════════════════════════════════════
+
+def create_driver(proxy_str=None, worker_id=0, chrome_version=145):
+    import tempfile
+    opts = uc.ChromeOptions()
+    if proxy_str:
+        opts.add_argument(f"--proxy-server={proxy_str}")
+    user_data = os.path.join(tempfile.gettempdir(), f"uc_worker_{worker_id}")
+    driver = uc.Chrome(options=opts, version_main=chrome_version, user_data_dir=user_data)
+    driver.set_window_size(1920, 1080)
+    driver.set_page_load_timeout(20)
     driver.implicitly_wait(5)
     return driver
 
 
 # ═══════════════════════════════════════════════
-# 3. 네이버 로그인
+# 네이버 로그인
 # ═══════════════════════════════════════════════
 
-def naver_login(driver: webdriver.Chrome, naver_id: str, naver_pw: str) -> bool:
+LOGIN_URL = "https://nid.naver.com/nidlogin.login?mode=form&url=https%3A%2F%2Fwww.naver.com"
+
+
+def naver_login(driver, account, log_fn=None):
     """
-    네이버 로그인.
-    # 수동 입력 필요: 네이버 로그인 페이지 구조가 변경되면 셀렉터 수정 필요
+    네이버 로그인. 캡차/보호조치 자동 처리.
+    반환: {"ok": bool, "msg": str, "error": str|None}
     """
-    LOGIN_URL = "https://nid.naver.com/nidlogin.login"
-    # 수동 입력 필요: 로그인 폼 CSS 셀렉터 (네이버 업데이트 시 변경될 수 있음)
-    ID_SELECTOR = "#id"
-    PW_SELECTOR = "#pw"
-    LOGIN_BTN_SELECTOR = ".btn_login"
+    _log = log_fn or (lambda msg: logger.info(msg))
+    nid = account["id"]
 
     try:
         driver.get(LOGIN_URL)
         time.sleep(1)
+        dismiss_alert(driver)
 
-        # clipboard 방식으로 입력 (자동입력 감지 우회)
-        id_input = driver.find_element(By.CSS_SELECTOR, ID_SELECTOR)
-        driver.execute_script(f"arguments[0].value = '{naver_id}';", id_input)
+        # 포커스
+        driver.switch_to.window(driver.current_window_handle)
+        driver.execute_script("window.focus();")
+        time.sleep(0.2)
 
-        pw_input = driver.find_element(By.CSS_SELECTOR, PW_SELECTOR)
-        driver.execute_script(f"arguments[0].value = '{naver_pw}';", pw_input)
+        # ID/PW 입력
+        id_input = driver.find_element(By.CSS_SELECTOR, "#id")
+        id_input.click()
+        time.sleep(0.1)
+        slow_type(id_input, account["id"])
+        time.sleep(0.3)
 
-        driver.find_element(By.CSS_SELECTOR, LOGIN_BTN_SELECTOR).click()
+        pw_input = driver.find_element(By.CSS_SELECTOR, "#pw")
+        pw_input.click()
+        time.sleep(0.1)
+        slow_type(pw_input, account["pw"])
+        time.sleep(0.3)
+
+        driver.find_element(By.CSS_SELECTOR, ".btn_login").click()
         time.sleep(2)
 
-        if "nid.naver.com" not in driver.current_url:
-            logger.info(f"로그인 성공: {naver_id}")
-            return True
-        logger.warning(f"로그인 실패: {naver_id}")
-        return False
+        url, page = get_page_safe(driver)
+
+        # ── 보호조치 ──
+        if "비정상적인 활동" in page or "보호(잠금) 조치" in page or "보호하고 있습니다" in page or "idSafetyRelease" in url:
+            return _handle_protection(driver, account, url, page, _log)
+
+        # ── 이용제한 ──
+        if "이용제한" in page or "이용 제한" in page:
+            return {"ok": False, "msg": "🔒 이용제한", "error": "blocked_unknown"}
+
+        # ── 로그인 성공 ──
+        if "nid.naver.com" not in url and "nidlogin" not in url:
+            return {"ok": True, "msg": f"로그인 성공 → {url[:50]}", "error": None}
+
+        # ── 캡차 ──
+        if "captcha" in page.lower() or "영수증" in page or "정답을 입력" in page or "빈 칸을 채워" in page:
+            return _handle_captcha(driver, account, _log)
+
+        # ── 에러 메시지 ──
+        err_msg = ""
+        try:
+            err_el = driver.find_element(By.CSS_SELECTOR, ".message_text, #err_common, .error_message")
+            err_msg = err_el.text.strip().replace("\n", " ")
+        except:
+            pass
+        return {"ok": False, "msg": f"로그인 실패 — {err_msg}" if err_msg else f"로그인 실패 (URL: {url[:50]})", "error": "login_fail"}
+
     except Exception as e:
-        logger.error(f"로그인 에러 ({naver_id}): {e}")
-        return False
+        return {"ok": False, "msg": str(e)[:80], "error": "exception"}
 
 
 # ═══════════════════════════════════════════════
-# 4. 카페 가입 / 가입 여부 확인
+# 보호조치 처리
 # ═══════════════════════════════════════════════
 
-def check_cafe_membership(driver: webdriver.Chrome, cafe_id: str) -> bool:
-    """카페 가입 여부 확인."""
-    # 수동 입력 필요: 가입 여부 판별 CSS 셀렉터 (카페 구조 변경 시 수정)
-    MEMBER_INDICATOR_SELECTOR = ".nick_btn"
-    try:
-        driver.get(f"https://cafe.naver.com/{cafe_id}")
-        time.sleep(2)
-        elements = driver.find_elements(By.CSS_SELECTOR, MEMBER_INDICATOR_SELECTOR)
-        return len(elements) > 0
-    except Exception as e:
-        logger.error(f"가입 여부 확인 실패 ({cafe_id}): {e}")
-        return False
+def _handle_protection(driver, account, url, page, _log):
+    nid = account["id"]
+    btns = driver.find_elements(By.CSS_SELECTOR, "a, button, div[role='button'], span")
+    for btn in btns:
+        try:
+            txt = btn.text.strip()
+            if "본인 확인" in txt:
+                return {"ok": False, "msg": "🔒 보호조치 → 📱 핸드폰 인증 (못풂)", "error": "blocked_phone"}
+            if "보호조치 해제" in txt or "보호 조치 해제" in txt:
+                btn.click()
+                time.sleep(3)
+                dismiss_alert(driver)
+                if account.get("name") and account.get("birth"):
+                    result = _solve_birthday(driver, account, _log)
+                    if result:
+                        return result
+                return {"ok": False, "msg": "🔒 보호조치 → 생년월일 인증 (개인정보 없음)", "error": "blocked_birthday"}
+        except:
+            continue
+    return {"ok": False, "msg": "🔒 영구정지 (해제 불가)", "error": "permanent_ban"}
 
 
-def auto_join_cafe(driver: webdriver.Chrome, cafe_id: str) -> bool:
-    """카페 미가입 시 자동 가입."""
-    # 수동 입력 필요: 가입 버튼 / 가입 폼 CSS 셀렉터
-    JOIN_BTN_SELECTOR = ".btn_join"
-    CONFIRM_BTN_SELECTOR = ".btn_submit"
-    try:
-        driver.get(f"https://cafe.naver.com/{cafe_id}")
-        time.sleep(2)
-        join_btn = driver.find_elements(By.CSS_SELECTOR, JOIN_BTN_SELECTOR)
-        if not join_btn:
-            logger.info(f"이미 가입된 카페: {cafe_id}")
-            return True
-        join_btn[0].click()
-        time.sleep(2)
-        confirm = driver.find_elements(By.CSS_SELECTOR, CONFIRM_BTN_SELECTOR)
-        if confirm:
-            confirm[0].click()
-            time.sleep(2)
-        logger.info(f"카페 가입 완료: {cafe_id}")
-        return True
-    except Exception as e:
-        logger.error(f"카페 가입 실패 ({cafe_id}): {e}")
-        return False
+def _solve_birthday(driver, account, _log):
+    """생년월일 입력 → 비밀번호 변경 → 2단계 인증 스킵 → 재로그인."""
+    name = account.get("name", "")
+    birth = account.get("birth", "")
+    gender = account.get("gender", "")
 
-
-# ═══════════════════════════════════════════════
-# 5. 등급 확인 / 게시판 탐색
-# ═══════════════════════════════════════════════
-
-def get_member_grade(driver: webdriver.Chrome, cafe_id: str) -> str:
-    """카페 내 현재 계정의 등급 조회."""
-    # 수동 입력 필요: 등급 표시 CSS 셀렉터
-    GRADE_SELECTOR = ".nick_level"
-    try:
-        driver.get(f"https://cafe.naver.com/{cafe_id}")
-        time.sleep(2)
-        el = driver.find_elements(By.CSS_SELECTOR, GRADE_SELECTOR)
-        if el:
-            grade = el[0].text.strip()
-            logger.info(f"등급 확인: {grade}")
-            return grade
-        return "알수없음"
-    except Exception as e:
-        logger.error(f"등급 확인 실패: {e}")
-        return "에러"
-
-
-def find_writable_boards(driver: webdriver.Chrome, cafe_id: str) -> list[dict]:
-    """글쓰기 가능한 게시판 목록 자동 탐색."""
-    # 수동 입력 필요: 게시판 목록 CSS 셀렉터
-    BOARD_LIST_SELECTOR = ".cafe-menu-list a"
-    boards = []
-    try:
-        driver.get(f"https://cafe.naver.com/{cafe_id}")
-        time.sleep(2)
-        elements = driver.find_elements(By.CSS_SELECTOR, BOARD_LIST_SELECTOR)
-        for el in elements:
-            href = el.get_attribute("href") or ""
-            match = re.search(r"menuid=(\d+)", href)
-            if match:
-                boards.append({"name": el.text.strip(), "menu_id": match.group(1)})
-        logger.info(f"게시판 {len(boards)}개 탐색 완료")
-    except Exception as e:
-        logger.error(f"게시판 탐색 실패: {e}")
-    return boards
-
-
-# ═══════════════════════════════════════════════
-# 6. 카페 글쓰기
-# ═══════════════════════════════════════════════
-
-def write_cafe_post(driver: webdriver.Chrome, cafe_id: str, menu_id: str,
-                    title: str, content: str, allow_comment: bool = True) -> bool:
-    """네이버 카페 글쓰기."""
-    # 수동 입력 필요: 글쓰기 에디터 CSS 셀렉터 (네이버 스마트에디터 구조에 따라 변경)
-    TITLE_SELECTOR = ".se-title-input"
-    CONTENT_SELECTOR = ".se-text-paragraph"
-    SUBMIT_BTN_SELECTOR = ".btn_submit"
-    COMMENT_TOGGLE_SELECTOR = ".checkbox_comment"
-
-    WRITE_URL = f"https://cafe.naver.com/ca-fe/cafes/{ cafe_id }/articles/write?boardType=L&menuId={menu_id}"
-    try:
-        driver.get(WRITE_URL)
-        time.sleep(3)
-
-        # 제목 입력
-        title_el = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, TITLE_SELECTOR))
-        )
-        title_el.click()
-        title_el.send_keys(title)
-
-        # 본문 입력
-        content_el = driver.find_element(By.CSS_SELECTOR, CONTENT_SELECTOR)
-        content_el.click()
-        content_el.send_keys(content)
-
-        # 댓글 허용 토글
-        if not allow_comment:
-            toggle = driver.find_elements(By.CSS_SELECTOR, COMMENT_TOGGLE_SELECTOR)
-            if toggle:
-                toggle[0].click()
-
-        # 등록
-        driver.find_element(By.CSS_SELECTOR, SUBMIT_BTN_SELECTOR).click()
-        time.sleep(3)
-        logger.info(f"글쓰기 완료: {title[:20]}...")
-        return True
-    except Exception as e:
-        logger.error(f"글쓰기 실패: {e}")
-        return False
-
-
-# ═══════════════════════════════════════════════
-# 7. 답글(댓글) 작성
-# ═══════════════════════════════════════════════
-
-def write_comment(driver: webdriver.Chrome, article_url: str, comment_text: str) -> bool:
-    """게시글에 댓글 작성."""
-    # 수동 입력 필요: 댓글 입력 영역 CSS 셀렉터
-    COMMENT_INPUT_SELECTOR = ".comment_inbox .comment_input"
-    COMMENT_SUBMIT_SELECTOR = ".comment_inbox .btn_register"
-    try:
-        driver.get(article_url)
-        time.sleep(2)
-        inp = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, COMMENT_INPUT_SELECTOR))
-        )
-        inp.click()
-        inp.send_keys(comment_text)
-        driver.find_element(By.CSS_SELECTOR, COMMENT_SUBMIT_SELECTOR).click()
-        time.sleep(2)
-        logger.info(f"댓글 작성 완료: {comment_text[:20]}...")
-        return True
-    except Exception as e:
-        logger.error(f"댓글 작성 실패: {e}")
-        return False
-
-
-def get_article_list(driver: webdriver.Chrome, cafe_id: str, menu_id: str,
-                     page: int = 1) -> list[dict]:
-    """게시판의 게시글 목록 가져오기."""
-    # 수동 입력 필요: 게시글 목록 CSS 셀렉터
-    ARTICLE_ROW_SELECTOR = ".article-board .board-list .inner_list"
-    ARTICLE_TITLE_SELECTOR = ".article"
-    ARTICLE_AUTHOR_GRADE_SELECTOR = ".member_level"
-
-    url = f"https://cafe.naver.com/ArticleList.nhn?search.clubid=&search.menuid={menu_id}&search.page={page}"
-    articles = []
-    try:
-        driver.get(url)
-        time.sleep(2)
-        rows = driver.find_elements(By.CSS_SELECTOR, ARTICLE_ROW_SELECTOR)
-        for row in rows:
-            title_el = row.find_elements(By.CSS_SELECTOR, ARTICLE_TITLE_SELECTOR)
-            grade_el = row.find_elements(By.CSS_SELECTOR, ARTICLE_AUTHOR_GRADE_SELECTOR)
-            href = title_el[0].get_attribute("href") if title_el else ""
-            articles.append({
-                "title": title_el[0].text.strip() if title_el else "",
-                "url": href,
-                "author_grade": grade_el[0].get_attribute("alt") if grade_el else "알수없음",
-            })
-    except Exception as e:
-        logger.error(f"게시글 목록 조회 실패: {e}")
-    return articles
-
-
-def filter_articles_by_grade(articles: list[dict], allowed_grades: list[str]) -> list[dict]:
-    """답글 등급 필터: 허용된 등급의 게시글만 반환."""
-    return [a for a in articles if a.get("author_grade") in allowed_grades]
-
-
-# ═══════════════════════════════════════════════
-# 8. 보조조치 해제
-# ═══════════════════════════════════════════════
-
-def check_and_release_auxiliary(driver: webdriver.Chrome, cafe_id: str) -> bool:
-    """보조조치 상태 확인 및 자동 해제 시도."""
-    # 수동 입력 필요: 보조조치 관련 CSS 셀렉터 / URL
-    AUX_CHECK_URL = f"https://cafe.naver.com/{cafe_id}"
-    AUX_INDICATOR_SELECTOR = ".restrict_area"
-    AUX_RELEASE_BTN_SELECTOR = ".btn_release"
-    try:
-        driver.get(AUX_CHECK_URL)
-        time.sleep(2)
-        indicator = driver.find_elements(By.CSS_SELECTOR, AUX_INDICATOR_SELECTOR)
-        if not indicator:
-            return True  # 보조조치 없음
-        release_btn = driver.find_elements(By.CSS_SELECTOR, AUX_RELEASE_BTN_SELECTOR)
-        if release_btn:
-            release_btn[0].click()
-            time.sleep(2)
-            logger.info(f"보조조치 해제 완료: {cafe_id}")
-            return True
-        logger.warning(f"보조조치 해제 버튼 없음: {cafe_id}")
-        return False
-    except Exception as e:
-        logger.error(f"보조조치 해제 실패: {e}")
-        return False
-
-
-# ═══════════════════════════════════════════════
-# 9. 2Captcha 캡차 풀기
-# ═══════════════════════════════════════════════
-
-def solve_captcha_2captcha(api_key: str, site_key: str, page_url: str) -> Optional[str]:
-    """2Captcha API로 reCAPTCHA 풀기."""
-    # 수동 입력 필요: site_key는 캡차가 있는 페이지에서 직접 확인 필요
-    try:
-        # 캡차 요청
-        resp = requests.post("http://2captcha.com/in.php", data={
-            "key": api_key, "method": "userrecaptcha",
-            "googlekey": site_key, "pageurl": page_url, "json": 1
-        }).json()
-        if resp.get("status") != 1:
-            logger.error(f"2Captcha 요청 실패: {resp}")
-            return None
-        task_id = resp["request"]
-
-        # 결과 폴링
-        for _ in range(30):
-            time.sleep(5)
-            result = requests.get("http://2captcha.com/res.php", params={
-                "key": api_key, "action": "get", "id": task_id, "json": 1
-            }).json()
-            if result.get("status") == 1:
-                logger.info("캡차 풀기 성공")
-                return result["request"]
-            if result.get("request") != "CAPCHA_NOT_READY":
-                logger.error(f"캡차 에러: {result}")
-                return None
-        logger.error("캡차 타임아웃")
+    parts = birth.replace("-", ".").split(".")
+    if len(parts) != 3:
         return None
+    year, month, day = parts
+
+    try:
+        # 이름
+        name_input = driver.find_elements(By.CSS_SELECTOR, "input[placeholder*='이름'], input[title*='이름'], input[name*='name']")
+        if name_input:
+            name_input[0].click()
+            time.sleep(0.2)
+            pyperclip.copy(name)
+            name_input[0].send_keys(Keys.CONTROL, "a")
+            name_input[0].send_keys(Keys.CONTROL, "v")
+            time.sleep(0.3)
+            _log(f"이름 입력: {name}")
+
+        # 성별
+        if gender:
+            for btn in driver.find_elements(By.CSS_SELECTOR, "label, button, span, div"):
+                try:
+                    txt = btn.text.strip()
+                    if (gender == "남" and txt == "남자") or (gender == "여" and txt == "여자"):
+                        btn.click()
+                        _log(f"성별 선택: {txt}")
+                        break
+                except:
+                    continue
+            time.sleep(0.3)
+
+        # 년도
+        year_input = driver.find_elements(By.CSS_SELECTOR, "input[placeholder*='년'], input[title*='년']")
+        if year_input:
+            year_input[0].click()
+            time.sleep(0.2)
+            pyperclip.copy(year)
+            year_input[0].send_keys(Keys.CONTROL, "a")
+            year_input[0].send_keys(Keys.CONTROL, "v")
+            time.sleep(0.2)
+            _log(f"년도 입력: {year}")
+
+        # 월 (JS)
+        month_val = str(int(month)).zfill(2)
+        driver.execute_script(f"""
+            var sel = document.getElementById('birthMonth');
+            if (sel) {{ sel.value = '{month_val}'; sel.dispatchEvent(new Event('change')); }}
+        """)
+        time.sleep(0.2)
+        _log(f"월 선택: {int(month)}월")
+
+        # 일
+        day_input = driver.find_elements(By.CSS_SELECTOR, "input[placeholder*='일'], input[title*='일']")
+        if day_input:
+            day_input[0].click()
+            time.sleep(0.2)
+            pyperclip.copy(str(int(day)))
+            day_input[0].send_keys(Keys.CONTROL, "a")
+            day_input[0].send_keys(Keys.CONTROL, "v")
+            time.sleep(0.2)
+            _log(f"일 입력: {int(day)}")
+
+        # 확인 버튼
+        for btn in driver.find_elements(By.CSS_SELECTOR, "button, a, input[type='submit']"):
+            try:
+                if btn.text.strip() == "확인":
+                    btn.click()
+                    time.sleep(3)
+                    break
+            except:
+                continue
+
+        # 비밀번호 변경 페이지
+        url3, page3 = get_page_safe(driver)
+        if "비밀번호를 변경" in page3 or "새 비밀번호" in page3:
+            new_pw = generate_random_password()
+            _log(f"새 비밀번호 생성: {new_pw}")
+
+            pw_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='password']")
+            if len(pw_inputs) >= 2:
+                pw_inputs[0].click()
+                time.sleep(0.1)
+                slow_type(pw_inputs[0], new_pw)
+                time.sleep(0.2)
+                pw_inputs[1].click()
+                time.sleep(0.1)
+                slow_type(pw_inputs[1], new_pw)
+                time.sleep(0.2)
+
+            # 자동입력 방지 (최대 3회)
+            for try_i in range(3):
+                if _solve_text_captcha(driver, _log):
+                    for btn in driver.find_elements(By.CSS_SELECTOR, "button, a, input[type='submit']"):
+                        try:
+                            if btn.text.strip() == "확인":
+                                btn.click()
+                                time.sleep(3)
+                                break
+                        except:
+                            continue
+                    url4, page4 = get_page_safe(driver)
+                    if "잘못된 자동입력" in page4 or "다시 입력" in page4:
+                        _log(f"자동입력 방지 문자 틀림 ({try_i+1}/3)")
+                        continue
+                    break
+
+            # 2단계 인증 → 나중에 하기
+            time.sleep(2)
+            url5, page5 = get_page_safe(driver)
+            if "2단계 인증" in page5 or "나중에 하기" in page5:
+                for btn in driver.find_elements(By.CSS_SELECTOR, "button, a"):
+                    try:
+                        if "나중에 하기" in btn.text.strip():
+                            btn.click()
+                            _log("2단계 인증 → 나중에 하기")
+                            time.sleep(2)
+                            break
+                    except:
+                        continue
+
+            save_new_password(account["id"], new_pw)
+            account["pw"] = new_pw
+            _log(f"비밀번호 변경 저장 완료")
+
+            # 재로그인
+            url6, page6 = get_page_safe(driver)
+            if "nidlogin" in url6 or "로그인" in page6:
+                _log("바뀐 비밀번호로 재로그인...")
+                driver.switch_to.window(driver.current_window_handle)
+                driver.execute_script("window.focus();")
+                id_input = driver.find_element(By.CSS_SELECTOR, "#id")
+                id_input.click()
+                slow_type(id_input, account["id"])
+                time.sleep(0.2)
+                pw_input = driver.find_element(By.CSS_SELECTOR, "#pw")
+                pw_input.click()
+                slow_type(pw_input, new_pw)
+                time.sleep(0.2)
+                driver.find_element(By.CSS_SELECTOR, ".btn_login").click()
+                time.sleep(3)
+                url7, _ = get_page_safe(driver)
+                if "nid.naver.com" not in url7:
+                    _log("재로그인 성공!")
+                    return {"ok": True, "msg": f"보호조치 해제 + 재로그인 성공", "error": None}
+
+        return {"ok": False, "msg": "🔒 보호조치 → 생년월일 입력 완료", "error": "blocked_birthday"}
+
     except Exception as e:
-        logger.error(f"2Captcha 에러: {e}")
+        _log(f"생년월일 입력 실패: {str(e)[:60]}")
         return None
 
 
 # ═══════════════════════════════════════════════
-# 10. Gemini AI 원고 생성
+# 캡차 처리
 # ═══════════════════════════════════════════════
 
-def generate_content_gemini(api_key: str, model_name: str, keyword: str,
-                            prompt_template: Optional[str] = None) -> str:
-    """Gemini API로 키워드 기반 원고 생성."""
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(model_name)
-    prompt = prompt_template or (
-        f"'{keyword}' 키워드로 네이버 카페에 올릴 자연스러운 글을 작성해줘. "
-        f"광고 느낌 없이 정보성 글로 500자 내외로 작성해."
-    )
+def _handle_captcha(driver, account, _log):
+    nid = account["id"]
+    gemini_key = get_gemini_key()
+    if not gemini_key:
+        return {"ok": False, "msg": "캡차 발생 (Gemini 키 없음)", "error": "captcha"}
+
+    if _solve_receipt_captcha(driver, account, gemini_key, _log):
+        url2, _ = get_page_safe(driver)
+        if "nid.naver.com" not in url2 and "nidlogin" not in url2:
+            return {"ok": True, "msg": f"🤖 캡차 풀고 로그인 성공 → {url2[:50]}", "error": None}
+    return {"ok": False, "msg": "🤖 캡차 풀기 실패", "error": "captcha"}
+
+
+def _solve_receipt_captcha(driver, account, gemini_key, _log):
     try:
-        response = model.generate_content(prompt)
-        logger.info(f"Gemini 원고 생성 완료 (키워드: {keyword})")
-        return response.text
+        captcha_img = driver.find_elements(By.CSS_SELECTOR, "#captchaimg")
+        if not captcha_img:
+            captcha_img = driver.find_elements(By.CSS_SELECTOR, ".captcha_img")
+        if not captcha_img:
+            return False
+
+        # 질문
+        question = ""
+        q_el = driver.find_elements(By.CSS_SELECTOR, "#captcha_info, .captcha_message")
+        if q_el:
+            question = q_el[0].text.strip()
+        _log(f"캡차 질문: {question[:50]}")
+
+        # Gemini
+        img_b64 = captcha_img[0].screenshot_as_base64
+        genai.configure(api_key=gemini_key)
+        model = genai.GenerativeModel("gemini-2.5-pro")
+
+        import PIL.Image, io
+        img = PIL.Image.open(io.BytesIO(base64.b64decode(img_b64)))
+
+        prompt = f"""이 영수증 이미지를 보고 아래 질문에 답해주세요.
+질문: {question}
+영수증에 적힌 내용을 정확히 읽고 정답만 짧게 답하세요. 설명 없이 정답만."""
+
+        response = model.generate_content([prompt, img])
+        answer = re.sub(r'[^\w가-힣]', '', response.text.strip())
+        _log(f"Gemini 답변: {answer}")
+
+        # 입력
+        input_el = driver.find_elements(By.CSS_SELECTOR, "#captcha")
+        if not input_el:
+            input_el = driver.find_elements(By.CSS_SELECTOR, "#chptcha")
+        if input_el:
+            input_el[0].click()
+            time.sleep(0.2)
+            pyperclip.copy(answer)
+            input_el[0].send_keys(Keys.CONTROL, "a")
+            input_el[0].send_keys(Keys.CONTROL, "v")
+            time.sleep(0.3)
+
+        # 비밀번호 재입력
+        if account:
+            pw_input = driver.find_elements(By.CSS_SELECTOR, "#pw")
+            if pw_input:
+                pw_input[0].click()
+                time.sleep(0.2)
+                pyperclip.copy(account["pw"])
+                pw_input[0].send_keys(Keys.CONTROL, "a")
+                pw_input[0].send_keys(Keys.CONTROL, "v")
+                time.sleep(0.3)
+
+        driver.find_element(By.CSS_SELECTOR, ".btn_login").click()
+        time.sleep(3)
+        return True
+
     except Exception as e:
-        logger.error(f"Gemini 생성 실패: {e}")
-        return ""
+        _log(f"캡차 풀기 실패: {str(e)[:60]}")
+        return False
 
 
-# ═══════════════════════════════════════════════
-# 11. 구글시트 연동
-# ═══════════════════════════════════════════════
+def _solve_text_captcha(driver, _log):
+    gemini_key = get_gemini_key()
+    if not gemini_key:
+        return False
+    try:
+        captcha_imgs = driver.find_elements(By.CSS_SELECTOR, "img[src*='captcha'], img.captcha_img, #captchaimg")
+        if not captcha_imgs:
+            return False
 
-GSHEET_SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
+        img_b64 = captcha_imgs[0].screenshot_as_base64
+        genai.configure(api_key=gemini_key)
+        model = genai.GenerativeModel("gemini-2.5-pro")
 
+        import PIL.Image, io
+        img = PIL.Image.open(io.BytesIO(base64.b64decode(img_b64)))
 
-def connect_gsheet(cred_path: str, sheet_url: str) -> gspread.Spreadsheet:
-    """구글시트 연결."""
-    creds = Credentials.from_service_account_file(cred_path, scopes=GSHEET_SCOPES)
-    gc = gspread.authorize(creds)
-    spreadsheet = gc.open_by_url(sheet_url)
-    logger.info("구글시트 연결 완료")
-    return spreadsheet
+        prompt = """이 이미지에 보이는 텍스트/문자를 정확히 읽어주세요.
+왜곡된 글자입니다. 보이는 영문자와 숫자만 정확히 답해주세요. 설명 없이 문자만."""
 
+        response = model.generate_content([prompt, img])
+        answer = re.sub(r'[^a-zA-Z0-9]', '', response.text.strip())
+        _log(f"캡차 문자 인식: {answer}")
 
-def read_keywords_from_sheet(spreadsheet: gspread.Spreadsheet, sheet_name: str = "키워드") -> list[str]:
-    """키워드 시트에서 키워드 목록 읽기."""
-    ws = spreadsheet.worksheet(sheet_name)
-    values = ws.col_values(1)  # A열
-    keywords = [v.strip() for v in values[1:] if v.strip()]  # 헤더 제외
-    logger.info(f"키워드 {len(keywords)}개 로드")
-    return keywords
-
-
-def read_contents_from_sheet(spreadsheet: gspread.Spreadsheet, sheet_name: str = "원고") -> list[dict]:
-    """원고 시트에서 제목/본문 읽기."""
-    ws = spreadsheet.worksheet(sheet_name)
-    records = ws.get_all_records()
-    logger.info(f"원고 {len(records)}개 로드")
-    return records
-
-
-def append_result_to_sheet(spreadsheet: gspread.Spreadsheet, sheet_name: str,
-                           row: list) -> None:
-    """결과를 시트에 한 줄 추가."""
-    ws = spreadsheet.worksheet(sheet_name)
-    ws.append_row(row)
-
-
-# ═══════════════════════════════════════════════
-# 12. 원고 폴더 로드
-# ═══════════════════════════════════════════════
-
-def load_contents_from_folder(folder_path: str) -> list[dict]:
-    """원고 폴더에서 텍스트 파일 로드. 파일명=제목, 내용=본문."""
-    contents = []
-    for fname in sorted(os.listdir(folder_path)):
-        fpath = os.path.join(folder_path, fname)
-        if os.path.isfile(fpath):
-            with open(fpath, "r", encoding="utf-8") as f:
-                body = f.read().strip()
-            title = os.path.splitext(fname)[0]
-            contents.append({"title": title, "content": body})
-    logger.info(f"원고 폴더에서 {len(contents)}개 로드")
-    return contents
-
-
-
+        captcha_input = driver.find_elements(By.CSS_SELECTOR, "#autoValue")
+        if not captcha_input:
+            captcha_input = driver.find_elements(By.CSS_SELECTOR, "input[name='autoValue']")
+        if captcha_input:
+            captcha_input[0].click()
+            time.sleep(0.1)
+            slow_type(captcha_input[0], answer)
+            return True
+    except Exception as e:
+        _log(f"텍스트 캡차 실패: {str(e)[:60]}")
+    return False
