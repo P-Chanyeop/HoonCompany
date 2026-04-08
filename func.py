@@ -58,7 +58,7 @@ def load_accounts_from_gsheet():
         from googleapiclient.discovery import build
         service = build('sheets', 'v4', developerKey=gs_key)
         result = service.spreadsheets().values().get(
-            spreadsheetId=gs_id, range='A2:H1000'
+            spreadsheetId=gs_id, range='A2:I1000'
         ).execute()
         accounts = []
         for row in result.get('values', []):
@@ -69,7 +69,8 @@ def load_accounts_from_gsheet():
                     "name": row[2].strip() if len(row) > 2 else "",
                     "birth": row[3].strip() if len(row) > 3 else "",
                     "gender": row[4].strip() if len(row) > 4 else "",
-                    "cafe_urls": row[7].strip() if len(row) > 7 else "",
+                    "cafe_url": row[7].strip() if len(row) > 7 else "",
+                    "menu_id": row[8].strip() if len(row) > 8 else "",
                 })
         logger.info(f"구글시트에서 {len(accounts)}개 계정 로드")
         return accounts
@@ -208,11 +209,11 @@ def naver_login(driver, account, log_fn=None):
 
         # ── 이용제한 ──
         if "이용제한" in page or "이용 제한" in page:
-            return {"ok": False, "msg": "🔒 이용제한", "error": "blocked_unknown"}
+            return {"ok": False, "msg": "이용제한", "error": "blocked_unknown"}
 
         # ── 로그인 성공 ──
         if "nid.naver.com" not in url and "nidlogin" not in url:
-            return {"ok": True, "msg": f"로그인 성공 → {url[:50]}", "error": None}
+            return {"ok": True, "msg": f"로그인 성공 - {url[:50]}", "error": None}
 
         # ── 캡차 ──
         if "captcha" in page.lower() or "영수증" in page or "정답을 입력" in page or "빈 칸을 채워" in page:
@@ -242,23 +243,30 @@ def _handle_protection(driver, account, url, page, _log):
         try:
             txt = btn.text.strip()
             if "본인 확인" in txt:
-                return {"ok": False, "msg": "🔒 보호조치 → 📱 핸드폰 인증 (못풂)", "error": "blocked_phone"}
+                return {"ok": False, "msg": "보호조치 - 핸드폰 인증 (해제 불가)", "error": "blocked_phone"}
             if "보호조치 해제" in txt or "보호 조치 해제" in txt:
                 btn.click()
                 time.sleep(3)
                 dismiss_alert(driver)
-                if account.get("name") and account.get("birth"):
-                    result = _solve_birthday(driver, account, _log)
-                    if result:
-                        return result
-                return {"ok": False, "msg": "🔒 보호조치 → 생년월일 인증 (개인정보 없음)", "error": "blocked_birthday"}
+                # 해제 페이지에서 생년월일/핸드폰 판별
+                url2, page2 = get_page_safe(driver)
+                if "생년월일" in page2:
+                    if account.get("name") and account.get("birth"):
+                        result = _solve_birthday(driver, account, _log)
+                        if result:
+                            return result
+                    return {"ok": False, "msg": "보호조치 - 생년월일 인증 (개인정보 없음)", "error": "blocked_birthday"}
+                elif "휴대전화" in page2 or "휴대폰" in page2 or "+82" in page2:
+                    return {"ok": False, "msg": "보호조치 - 핸드폰 인증 (해제 불가)", "error": "blocked_phone"}
+                else:
+                    return {"ok": False, "msg": "보호조치 - 해제 방식 불명", "error": "blocked_unknown"}
         except:
             continue
-    return {"ok": False, "msg": "🔒 영구정지 (해제 불가)", "error": "permanent_ban"}
+    return {"ok": False, "msg": "영구정지 (해제 불가)", "error": "permanent_ban"}
 
 
 def _solve_birthday(driver, account, _log):
-    """생년월일 입력 → 비밀번호 변경 → 2단계 인증 스킵 → 재로그인."""
+    """생년월일 입력 - 비밀번호 변경 - 2단계 인증 스킵 - 재로그인."""
     name = account.get("name", "")
     birth = account.get("birth", "")
     gender = account.get("gender", "")
@@ -368,7 +376,7 @@ def _solve_birthday(driver, account, _log):
                         continue
                     break
 
-            # 2단계 인증 → 나중에 하기
+            # 2단계 인증 - 나중에 하기
             time.sleep(2)
             url5, page5 = get_page_safe(driver)
             if "2단계 인증" in page5 or "나중에 하기" in page5:
@@ -376,7 +384,7 @@ def _solve_birthday(driver, account, _log):
                     try:
                         if "나중에 하기" in btn.text.strip():
                             btn.click()
-                            _log("2단계 인증 → 나중에 하기")
+                            _log("2단계 인증 - 나중에 하기")
                             time.sleep(2)
                             break
                     except:
@@ -407,7 +415,7 @@ def _solve_birthday(driver, account, _log):
                     _log("재로그인 성공!")
                     return {"ok": True, "msg": f"보호조치 해제 + 재로그인 성공", "error": None}
 
-        return {"ok": False, "msg": "🔒 보호조치 → 생년월일 입력 완료", "error": "blocked_birthday"}
+        return {"ok": False, "msg": "보호조치 - 생년월일 입력 완료", "error": "blocked_birthday"}
 
     except Exception as e:
         _log(f"생년월일 입력 실패: {str(e)[:60]}")
@@ -427,8 +435,8 @@ def _handle_captcha(driver, account, _log):
     if _solve_receipt_captcha(driver, account, gemini_key, _log):
         url2, _ = get_page_safe(driver)
         if "nid.naver.com" not in url2 and "nidlogin" not in url2:
-            return {"ok": True, "msg": f"🤖 캡차 풀고 로그인 성공 → {url2[:50]}", "error": None}
-    return {"ok": False, "msg": "🤖 캡차 풀기 실패", "error": "captcha"}
+            return {"ok": True, "msg": f"캡차 풀고 로그인 성공 - {url2[:50]}", "error": None}
+    return {"ok": False, "msg": "캡차 풀기 실패", "error": "captcha"}
 
 
 def _solve_receipt_captcha(driver, account, gemini_key, _log):

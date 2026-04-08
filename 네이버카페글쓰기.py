@@ -453,7 +453,7 @@ class LoginWorkerThread(QThread):
             proxy = self.proxies[i]
             nid = acc["id"]
 
-            self.log_signal.emit(f"워커#{i+1} 🔌 프록시={proxy} / ID={nid}")
+            self.log_signal.emit(f"워커#{i+1} 프록시={proxy} / ID={nid}")
             self.worker_update.emit(i, nid, proxy, "로그인 중...", "-")
 
             try:
@@ -464,7 +464,7 @@ class LoginWorkerThread(QThread):
                 result["id"] = nid
                 self.results.append(result)
 
-                status = "✅ 성공" if result["ok"] else f"❌ {result.get('error', 'fail')}"
+                status = "[성공] 성공" if result["ok"] else f"[실패] {result.get('error', 'fail')}"
                 self.worker_update.emit(i, nid, proxy, status, result["msg"][:30])
                 self.log_signal.emit(f"워커#{i+1} {'✅' if result['ok'] else '❌'} [{nid}] {result['msg']}")
 
@@ -478,8 +478,8 @@ class LoginWorkerThread(QThread):
                     self.drivers.append((i, driver))
 
             except Exception as e:
-                self.log_signal.emit(f"워커#{i+1} ❌ [{nid}] {str(e)[:60]}")
-                self.worker_update.emit(i, nid, proxy, "❌ 에러", str(e)[:30])
+                self.log_signal.emit(f"워커#{i+1} [실패] [{nid}] {str(e)[:60]}")
+                self.worker_update.emit(i, nid, proxy, "[실패] 에러", str(e)[:30])
 
         # 결과 집계
         ok = len([r for r in self.results if r["ok"]])
@@ -711,7 +711,7 @@ class CafeWriterTab(QWidget):
         self.log_area = QPlainTextEdit()
         self.log_area.setReadOnly(True)
         self.log_area.setMaximumBlockCount(1000)
-        self.log_area.setFont(QFont("Consolas", 10))
+        self.log_area.setFont(QFont("Malgun Gothic", 10))
         self.log_area.setStyleSheet(
             "background-color: #fafafa; color: #202030; border: 1px solid #c0c0cc;"
         )
@@ -814,9 +814,9 @@ class CafeWriterTab(QWidget):
         self.worker_table.setItem(idx, 1, QTableWidgetItem(account))
         self.worker_table.setItem(idx, 2, QTableWidgetItem(proxy[:20]))
         item = QTableWidgetItem(status)
-        if "✅" in status:
+        if "성공" in status:
             item.setForeground(QColor("#2e7d32"))
-        elif "❌" in status:
+        elif "실패" in status:
             item.setForeground(QColor("#c62828"))
         else:
             item.setForeground(QColor("#b08800"))
@@ -829,13 +829,20 @@ class CafeWriterTab(QWidget):
 
     def _on_finished(self, results):
         ok = len([r for r in results if r["ok"]])
-        fail = len(results) - ok
-        self._log(f"=== 전체 완료: 성공 {ok} / 실패 {fail} / 총 {len(results)} ===")
+        bday = len([r for r in results if r.get("error") == "blocked_birthday"])
+        phone = len([r for r in results if r.get("error") == "blocked_phone"])
+        perm = len([r for r in results if r.get("error") == "permanent_ban"])
+        captcha = len([r for r in results if r.get("error") == "captcha"])
+        security = len([r for r in results if r.get("error") == "security"])
+        fail = len([r for r in results if not r["ok"] and r.get("error") not in
+                    ("blocked_birthday", "blocked_phone", "permanent_ban", "captcha", "security")])
+        total = len(results)
+        self._log(f"=== 결과: 성공 {ok} | 생년월일 {bday} | 핸드폰(해제불가) {phone} | 영구정지 {perm} | 캡차 {captcha} | 보안인증 {security} | 실패 {fail} / 총 {total}개 ===")
         self.btn_start.setEnabled(True)
         self.btn_pause.setEnabled(False)
         self.btn_stop.setEnabled(False)
         self.lbl_success.setText(f"성공: {ok}")
-        self.lbl_fail.setText(f"실패: {fail}")
+        self.lbl_fail.setText(f"실패: {total - ok}")
 
     def _on_stop(self):
         if hasattr(self, '_worker_thread') and self._worker_thread.isRunning():
