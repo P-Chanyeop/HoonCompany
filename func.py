@@ -586,20 +586,12 @@ def _solve_text_captcha(driver, _log):
 # ═══════════════════════════════════════════════
 
 def get_cafe_grades(driver, cafe_url, log_fn=None):
-    """카페 등급 조회 — 카페 접속 → iframe 전환 → 나의활동 → 등급 안내 팝업."""
+    """카페 등급 조회 — 카페 접속 → 나의활동 → 등급 안내 팝업."""
     _log = log_fn or (lambda msg: logger.info(msg))
     try:
         driver.get(cafe_url)
         time.sleep(3)
         dismiss_alert(driver)
-
-        # iframe으로 전환 (네이버 카페는 cafe_main iframe 안에 콘텐츠가 있음)
-        try:
-            iframe = driver.find_element(By.CSS_SELECTOR, "iframe#cafe_main")
-            _log("cafe_main iframe 전환")
-            time.sleep(1)
-        except:
-            _log("iframe 없음 - 메인 프레임에서 진행")
 
         # 나의활동 JS 호출
         try:
@@ -614,28 +606,25 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
         original_handles = set(driver.window_handles)
         try:
             driver.execute_script("viewMyMemberLevel();")
-            time.sleep(2)
+            time.sleep(3)
             _log("등급 안내 호출 성공")
         except:
             _log("등급 안내 실패")
             return {"my_grade": -1, "my_grade_text": "", "grades": {}}
 
-        # 새 창 전환 (최대 5초 대기)
-        new_handle = None
-        for _ in range(10):
-            new_handles = set(driver.window_handles) - original_handles
-            if new_handles:
-                new_handle = new_handles.pop()
-                break
-            time.sleep(0.5)
+        # 새 창 또는 현재 페이지에서 등급 파싱
+        grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}}
 
-        if new_handle:
+        # 먼저 새 창 확인
+        new_handle = None
+        new_handles = set(driver.window_handles) - original_handles
+        if new_handles:
+            new_handle = new_handles.pop()
             driver.switch_to.window(new_handle)
             time.sleep(2)
-            _log("등급 팝업 창 전환")
+            _log("등급 팝업 새 창 전환")
 
         # 등급 파싱 (최대 5초 대기)
-        grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}}
         for _ in range(10):
             grade_rows = driver.find_elements(By.CSS_SELECTOR, "strong.level_icon_area")
             if grade_rows:
