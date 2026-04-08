@@ -604,16 +604,22 @@ def _get_grade_info(driver, _log):
             _log("등급 안내 호출 실패")
             return grade_info
 
-        # 새 창/팝업으로 전환
-        all_handles = driver.window_handles
-        for handle in all_handles:
-            if handle != original_handle:
-                driver.switch_to.window(handle)
-                time.sleep(1)
-                _log("등급 팝업 창 전환")
+        # 새 창/팝업으로 전환 (최대 5초 대기)
+        switched = False
+        for _ in range(10):
+            all_handles = driver.window_handles
+            if len(all_handles) > 1:
+                for handle in all_handles:
+                    if handle != original_handle:
+                        driver.switch_to.window(handle)
+                        time.sleep(1)
+                        _log("등급 팝업 창 전환")
+                        switched = True
+                        break
                 break
+            time.sleep(0.5)
 
-        # 등급 목록 파싱
+        # 등급 목록 파싱 (새 창이든 현재 창이든)
         grade_rows = driver.find_elements(By.CSS_SELECTOR, "strong.level_icon_area")
         if grade_rows:
             for idx, row in enumerate(grade_rows):
