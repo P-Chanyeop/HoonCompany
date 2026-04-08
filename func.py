@@ -543,6 +543,55 @@ def _solve_text_captcha(driver, _log):
 # 카페 접속
 # ═══════════════════════════════════════════════
 
+def _get_grade_info(driver, _log):
+    """등급 안내 클릭 → 등급 목록 파싱. 디버깅용 HTML 저장."""
+    grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}}
+    try:
+        # "등급 안내" 링크 클릭
+        links = driver.find_elements(By.CSS_SELECTOR, "a")
+        for link in links:
+            try:
+                if "등급 안내" in link.text.strip() or "등급안내" in link.text.strip():
+                    link.click()
+                    time.sleep(2)
+                    _log("등급 안내 팝업 열림")
+                    break
+            except:
+                continue
+
+        # 디버깅: 페이지/팝업 소스 저장
+        with open("grade_debug.html", "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+        _log("grade_debug.html 저장됨")
+
+        # 등급 목록 파싱 시도
+        grade_rows = driver.find_elements(By.CSS_SELECTOR, ".grade_row, tr[class*='grade'], li[class*='grade'], .level_item, .grade_item")
+        if grade_rows:
+            for idx, row in enumerate(grade_rows):
+                txt = row.text.strip()
+                if txt:
+                    grade_info["grades"][idx] = txt
+                    _log(f"등급 {idx}: {txt}")
+        else:
+            _log("등급 행 못 찾음 - grade_debug.html 확인 필요")
+
+        # 팝업 닫기
+        try:
+            close_btns = driver.find_elements(By.CSS_SELECTOR, ".btn_close, button[class*='close'], .popup_close")
+            for btn in close_btns:
+                if btn.is_displayed():
+                    btn.click()
+                    time.sleep(0.5)
+                    break
+        except:
+            pass
+
+    except Exception as e:
+        _log(f"등급 정보 파싱 실패: {str(e)[:60]}")
+
+    return grade_info
+
+
 def visit_cafe(driver, account, log_fn=None):
     """
     로그인된 드라이버로 카페 접속.
@@ -602,16 +651,20 @@ def visit_cafe(driver, account, log_fn=None):
         except:
             pass
 
+        # 등급 안내 클릭 → 등급 정보 파싱
+        time.sleep(1)
+        grade_info = _get_grade_info(driver, _log)
+
         # 메뉴 ID가 있으면 해당 게시판으로 이동
         if menu_id:
             board_url = f"{cafe_url}?iframe_url=/ArticleList.nhn%3Fsearch.clubid=%26search.menuid={menu_id}"
             driver.get(board_url)
             time.sleep(2)
             _log(f"지정 게시판 이동: 메뉴ID={menu_id}")
-            return {"ok": True, "msg": f"카페 접속 + 게시판 이동 (메뉴ID: {menu_id})", "menu_id": menu_id}
+            return {"ok": True, "msg": f"카페 접속 + 게시판 이동 (메뉴ID: {menu_id})", "menu_id": menu_id, "grade_info": grade_info}
 
         # 메뉴 ID 없으면 자동 탐색은 나중에 구현
-        return {"ok": True, "msg": "카페 접속 성공 (게시판 미지정)", "menu_id": ""}
+        return {"ok": True, "msg": "카페 접속 성공 (게시판 미지정)", "menu_id": "", "grade_info": grade_info}
 
     except Exception as e:
         return {"ok": False, "msg": f"카페 접속 에러: {str(e)[:60]}"}
