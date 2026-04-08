@@ -425,7 +425,7 @@ class SettingsTab(QWidget):
 class LoginWorkerThread(QThread):
     """순차적으로 계정 로그인을 수행하는 워커 스레드."""
     log_signal = pyqtSignal(str)
-    worker_update = pyqtSignal(int, str, str, str, str)  # idx, account, proxy, status, detail
+    worker_update = pyqtSignal(int, str)  # idx, status
     finished_signal = pyqtSignal(list)  # results
 
     def __init__(self, accounts, proxies, worker_count):
@@ -452,7 +452,7 @@ class LoginWorkerThread(QThread):
             nid = acc["id"]
 
             self.log_signal.emit(f"워커#{i+1} 프록시={proxy} / ID={nid}")
-            self.worker_update.emit(i, nid, proxy, "로그인 중...", "-")
+            self.worker_update.emit(i, "로그인 중...")
 
             try:
                 driver = func.create_driver(proxy, i)
@@ -462,25 +462,30 @@ class LoginWorkerThread(QThread):
                 result["id"] = nid
                 self.results.append(result)
 
-                status = "[성공] 성공" if result["ok"] else f"[실패] {result.get('error', 'fail')}"
-                self.worker_update.emit(i, nid, proxy, status, result["msg"][:30])
-                self.log_signal.emit(f"워커#{i+1} {'[성공]' if result['ok'] else '[실패]'} [{nid}] {result['msg']}")
+                if result["ok"]:
+                    self.worker_update.emit(i, "로그인 성공")
+                    self.log_signal.emit(f"워커#{i+1} [성공] [{nid}] {result['msg']}")
 
-                # 로그인 성공 시 카페 접속
-                if result["ok"] and acc.get("cafe_url"):
-                    try:
-                        cafe_result = func.visit_cafe(driver, acc, log_fn)
-                        self.log_signal.emit(f"워커#{i+1} [{nid}] 카페: {cafe_result['msg']}")
-                        if cafe_result.get("ok"):
-                            self.worker_update.emit(i, nid, proxy, "[성공] 카페접속", cafe_result["msg"][:30])
-                        else:
-                            self.worker_update.emit(i, nid, proxy, "[실패] 카페접속", cafe_result["msg"][:30])
-                    except Exception as ce:
-                        self.log_signal.emit(f"워커#{i+1} [{nid}] 카페 접속 에러: {str(ce)[:60]}")
-                elif result["ok"]:
-                    self.log_signal.emit(f"워커#{i+1} [{nid}] 카페 URL 없음 - 스킵")
+                    # 카페 접속
+                    if acc.get("cafe_url"):
+                        self.worker_update.emit(i, "카페 접속 중...")
+                        try:
+                            cafe_result = func.visit_cafe(driver, acc, log_fn)
+                            self.log_signal.emit(f"워커#{i+1} [{nid}] 카페: {cafe_result['msg']}")
+                            if cafe_result.get("ok"):
+                                self.worker_update.emit(i, "카페 접속 완료")
+                            else:
+                                self.worker_update.emit(i, f"카페 실패: {cafe_result['msg'][:20]}")
+                        except Exception as ce:
+                            self.log_signal.emit(f"워커#{i+1} [{nid}] 카페 에러: {str(ce)[:60]}")
+                            self.worker_update.emit(i, "카페 접속 에러")
+                    else:
+                        self.worker_update.emit(i, "카페 URL 없음")
+                else:
+                    self.worker_update.emit(i, result["msg"][:30])
+                    self.log_signal.emit(f"워커#{i+1} [실패] [{nid}] {result['msg']}")
 
-                # 실패한 창 닫기 (성공/생년월일은 유지)
+                # 실패한 창 닫기
                 if result.get("error") in ("blocked_phone", "permanent_ban", "login_fail", "exception"):
                     try:
                         driver.quit()
@@ -491,7 +496,7 @@ class LoginWorkerThread(QThread):
 
             except Exception as e:
                 self.log_signal.emit(f"워커#{i+1} [실패] [{nid}] {str(e)[:60]}")
-                self.worker_update.emit(i, nid, proxy, "[실패] 에러", str(e)[:30])
+                self.worker_update.emit(i, f"에러: {str(e)[:20]}")
 
         # 결과 집계
         ok = len([r for r in self.results if r["ok"]])
@@ -681,9 +686,9 @@ class CafeWriterTab(QWidget):
         worker_group = QGroupBox("워커 상태 모니터링")
         worker_layout = QVBoxLayout(worker_group)
 
-        self.worker_table = QTableWidget(0, 7)
+        self.worker_table = QTableWidget(0, 6)
         self.worker_table.setHorizontalHeaderLabels([
-            "워커#", "계정", "프록시", "상태", "카페", "게시판", "최근 작업"
+            "워커#", "계정", "프록시", "카페", "게시판", "상태"
         ])
         header = self.worker_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -806,12 +811,11 @@ class CafeWriterTab(QWidget):
             self.worker_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
             self.worker_table.setItem(i, 1, QTableWidgetItem(acc["id"]))
             self.worker_table.setItem(i, 2, QTableWidgetItem(proxy[:20]))
+            self.worker_table.setItem(i, 3, QTableWidgetItem(cafe_short))
+            self.worker_table.setItem(i, 4, QTableWidgetItem(menu))
             item = QTableWidgetItem("대기중")
             item.setForeground(QColor("#b08800"))
-            self.worker_table.setItem(i, 3, item)
-            self.worker_table.setItem(i, 4, QTableWidgetItem(cafe_short))
-            self.worker_table.setItem(i, 5, QTableWidgetItem(menu))
-            self.worker_table.setItem(i, 6, QTableWidgetItem("-"))
+            self.worker_table.setItem(i, 5, item)
 
         self.lbl_summary.setText(f"성공 0 | 생년월일 0 | 핸드폰 0 | 영구정지 0 | 캡차 0 | 보안인증 0 | 실패 0 / 총 {count}개")
         self.progress.setMaximum(count)
@@ -826,18 +830,15 @@ class CafeWriterTab(QWidget):
         self._worker_thread.finished_signal.connect(self._on_finished)
         self._worker_thread.start()
 
-    def _update_worker_table(self, idx, account, proxy, status, detail):
-        self.worker_table.setItem(idx, 1, QTableWidgetItem(account))
-        self.worker_table.setItem(idx, 2, QTableWidgetItem(proxy[:20]))
+    def _update_worker_table(self, idx, status):
         item = QTableWidgetItem(status)
-        if "성공" in status:
+        if "성공" in status or "완료" in status:
             item.setForeground(QColor("#2e7d32"))
-        elif "실패" in status:
+        elif "실패" in status or "에러" in status or "해제 불가" in status or "영구정지" in status:
             item.setForeground(QColor("#c62828"))
         else:
             item.setForeground(QColor("#b08800"))
-        self.worker_table.setItem(idx, 3, item)
-        self.worker_table.setItem(idx, 6, QTableWidgetItem(detail))
+        self.worker_table.setItem(idx, 5, item)
         self.progress.setValue(self.progress.value() + 1)
         self._update_summary(self._worker_thread.results)
 
