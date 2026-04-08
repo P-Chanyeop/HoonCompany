@@ -586,82 +586,36 @@ def _solve_text_captcha(driver, _log):
 # ═══════════════════════════════════════════════
 
 def get_cafe_grades(driver, cafe_url, log_fn=None):
-    """카페에 접속해서 나의활동 → 등급 안내 → 등급 목록 파싱."""
+    """카페 등급 목록 파싱 — 등급 안내 페이지 직접 접속."""
     _log = log_fn or (lambda msg: logger.info(msg))
     try:
+        # 카페 ID 추출 (https://cafe.naver.com/0404ab → 0404ab)
+        cafe_id = cafe_url.rstrip("/").split("/")[-1]
+
+        # 카페 메인 접속해서 clubid 가져오기
         driver.get(cafe_url)
-        # 최대 5초 대기 — 나의활동 요소 나타나면 바로 진행
-        for _ in range(10):
-            time.sleep(0.5)
-            if driver.find_elements(By.CSS_SELECTOR, "a, span"):
-                page_text = driver.page_source[:3000]
-                if "나의활동" in page_text or "카페 글쓰기" in page_text:
-                    break
+        time.sleep(3)
         dismiss_alert(driver)
 
-        # 나의활동 클릭 (JS 직접 호출)
-        clicked = False
-        for attempt in range(2):
-            try:
-                driver.execute_script("showMyAction();")
-                time.sleep(3)
-                clicked = True
-                _log("나의활동 호출 성공")
-                break
-            except:
-                time.sleep(2)
+        # clubid 추출 (페이지 소스에서)
+        page = driver.page_source
+        clubid = ""
+        match = re.search(r'clubid["\s:=]+(\d+)', page)
+        if match:
+            clubid = match.group(1)
+            _log(f"카페 clubid: {clubid}")
 
-        if not clicked:
-            _log("나의활동 호출 실패")
+        if not clubid:
+            _log("clubid 못 찾음")
             return {"my_grade": -1, "my_grade_text": "", "grades": {}}
 
-        # 등급 안내 클릭 + 파싱
-        time.sleep(1)
-        grade_info = _get_grade_info(driver, _log)
-        _log(f"등급 조회 완료: {len(grade_info['grades'])}개 등급")
-        return grade_info
-    except Exception as e:
-        _log(f"등급 조회 실패: {str(e)[:60]}")
-        return {"my_grade": -1, "my_grade_text": "", "grades": {}}
+        # 등급 안내 페이지 직접 접속
+        grade_url = f"https://cafe.naver.com/CafeGradeInfoView.nhn?clubid={clubid}"
+        driver.get(grade_url)
+        time.sleep(3)
 
-
-def _get_grade_info(driver, _log):
-    """등급 안내 클릭 → 팝업 핸들 전환 → 등급 목록 파싱."""
-    grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}}
-    original_handle = driver.current_window_handle
-    try:
-        # "등급 안내" JS 직접 호출 (최대 5초 대기)
-        clicked = False
-        for _ in range(10):
-            try:
-                driver.execute_script("viewMyMemberLevel();")
-                time.sleep(2)
-                _log("등급 안내 호출")
-                clicked = True
-                break
-            except:
-                time.sleep(0.5)
-
-        if not clicked:
-            _log("등급 안내 호출 실패")
-            return grade_info
-
-        # 새 창/팝업으로 전환 (최대 5초 대기)
-        switched = False
-        for _ in range(10):
-            all_handles = driver.window_handles
-            if len(all_handles) > 1:
-                for handle in all_handles:
-                    if handle != original_handle:
-                        driver.switch_to.window(handle)
-                        time.sleep(1)
-                        _log("등급 팝업 창 전환")
-                        switched = True
-                        break
-                break
-            time.sleep(0.5)
-
-        # 등급 목록 파싱 (새 창이든 현재 창이든)
+        # 등급 파싱
+        grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}}
         grade_rows = driver.find_elements(By.CSS_SELECTOR, "strong.level_icon_area")
         if grade_rows:
             for idx, row in enumerate(grade_rows):
@@ -672,21 +626,13 @@ def _get_grade_info(driver, _log):
         else:
             _log("등급 행 못 찾음")
 
-        # 팝업 창 닫고 원래 창으로 복귀
-        if driver.current_window_handle != original_handle:
-            driver.close()
-            driver.switch_to.window(original_handle)
-            time.sleep(0.5)
+        _log(f"등급 조회 완료: {len(grade_info['grades'])}개 등급")
+        return grade_info
 
     except Exception as e:
-        _log(f"등급 정보 파싱 실패: {str(e)[:60]}")
-        # 원래 창으로 복귀
-        try:
-            driver.switch_to.window(original_handle)
-        except:
-            pass
+        _log(f"등급 조회 실패: {str(e)[:60]}")
+        return {"my_grade": -1, "my_grade_text": "", "grades": {}}
 
-    return grade_info
 
 
 def visit_cafe(driver, account, log_fn=None):
