@@ -595,17 +595,28 @@ def _get_grade_info(driver, _log):
     grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}}
     original_handle = driver.current_window_handle
     try:
-        # "등급 안내" 링크 클릭
-        links = driver.find_elements(By.CSS_SELECTOR, "a")
-        for link in links:
-            try:
-                if "등급 안내" in link.text.strip() or "등급안내" in link.text.strip():
-                    link.click()
-                    time.sleep(2)
-                    _log("등급 안내 클릭")
-                    break
-            except:
-                continue
+        # "등급 안내" 링크 찾기 (최대 5초 대기)
+        clicked = False
+        for _ in range(10):
+            links = driver.find_elements(By.CSS_SELECTOR, "a")
+            for link in links:
+                try:
+                    txt = link.text.strip()
+                    if ("등급 안내" in txt or "등급안내" in txt) and link.is_displayed():
+                        link.click()
+                        time.sleep(2)
+                        _log("등급 안내 클릭")
+                        clicked = True
+                        break
+                except:
+                    continue
+            if clicked:
+                break
+            time.sleep(0.5)
+
+        if not clicked:
+            _log("등급 안내 링크 못 찾음")
+            return grade_info
 
         # 새 창/팝업으로 전환
         all_handles = driver.window_handles
