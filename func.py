@@ -624,17 +624,16 @@ def visit_cafe(driver, account, log_fn=None):
         if "cafe.naver.com" not in url:
             return {"ok": False, "msg": f"카페 접속 실패 (URL: {url[:50]})"}
 
-        # 카페 가입 여부 확인
+        # 카페 가입 여부 확인 — a._rosRestrict onclick으로 판별
         is_member = False
-
         try:
-            sidebar_btns = driver.find_elements(By.CSS_SELECTOR, "[class*='Sidebar_btn__']")
-            for btn in sidebar_btns:
-                txt = btn.text.strip()
-                if "카페 글쓰기" in txt:
+            ros_btns = driver.find_elements(By.CSS_SELECTOR, "a._rosRestrict")
+            for btn in ros_btns:
+                onclick = btn.get_attribute("onclick") or ""
+                if "writeBoard" in onclick:
                     is_member = True
                     break
-                elif "카페 가입하기" in txt:
+                elif "joinCafe" in onclick:
                     is_member = False
                     break
         except:
@@ -642,9 +641,7 @@ def visit_cafe(driver, account, log_fn=None):
 
         # 폴백: 페이지 소스에서 판별
         if not is_member:
-            if "카페 글쓰기" in page or "Sidebar_btn__write" in page:
-                is_member = True
-            elif "나의활동" in page:
+            if "writeBoard" in page:
                 is_member = True
 
         if not is_member:
