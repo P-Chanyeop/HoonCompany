@@ -611,6 +611,14 @@ def visit_cafe(driver, account, log_fn=None):
         dismiss_alert(driver)
 
         url, page = get_page_safe(driver)
+        _log(f"카페 현재 URL: {url}")
+
+        # 디버깅: 카페 페이지 소스 저장
+        try:
+            with open("cafe_debug.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+        except:
+            pass
 
         # 카페 접속 확인
         if "cafe.naver.com" not in url:
@@ -618,9 +626,6 @@ def visit_cafe(driver, account, log_fn=None):
 
         # 카페 가입 여부 확인
         is_member = False
-        # 디버깅: 카페 페이지 소스 저장
-        with open("cafe_debug.html", "w", encoding="utf-8") as f:
-            f.write(driver.page_source)
 
         try:
             sidebar_btns = driver.find_elements(By.CSS_SELECTOR, "[class*='Sidebar_btn__']")
