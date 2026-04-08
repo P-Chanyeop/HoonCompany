@@ -466,7 +466,16 @@ class LoginWorkerThread(QThread):
 
                 status = "[성공] 성공" if result["ok"] else f"[실패] {result.get('error', 'fail')}"
                 self.worker_update.emit(i, nid, proxy, status, result["msg"][:30])
-                self.log_signal.emit(f"워커#{i+1} {'✅' if result['ok'] else '❌'} [{nid}] {result['msg']}")
+                self.log_signal.emit(f"워커#{i+1} {'[성공]' if result['ok'] else '[실패]'} [{nid}] {result['msg']}")
+
+                # 로그인 성공 시 카페 접속
+                if result["ok"] and acc.get("cafe_url"):
+                    cafe_result = func.visit_cafe(driver, acc, log_fn)
+                    self.log_signal.emit(f"워커#{i+1} [{nid}] 카페: {cafe_result['msg']}")
+                    if cafe_result.get("ok"):
+                        self.worker_update.emit(i, nid, proxy, "[성공] 카페접속", cafe_result["msg"][:30])
+                    else:
+                        self.worker_update.emit(i, nid, proxy, "[실패] 카페접속", cafe_result["msg"][:30])
 
                 # 실패한 창 닫기 (성공/생년월일은 유지)
                 if result.get("error") in ("blocked_phone", "permanent_ban", "login_fail", "exception"):

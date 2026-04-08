@@ -58,7 +58,7 @@ def load_accounts_from_gsheet():
         from googleapiclient.discovery import build
         service = build('sheets', 'v4', developerKey=gs_key)
         result = service.spreadsheets().values().get(
-            spreadsheetId=gs_id, range='A2:I1000'
+            spreadsheetId=gs_id, range='A2:J1000'
         ).execute()
         accounts = []
         for row in result.get('values', []):
@@ -71,6 +71,7 @@ def load_accounts_from_gsheet():
                     "gender": row[4].strip() if len(row) > 4 else "",
                     "cafe_url": row[7].strip() if len(row) > 7 else "",
                     "menu_id": row[8].strip() if len(row) > 8 else "",
+                    "post_count": int(row[9].strip()) if len(row) > 9 and row[9].strip().isdigit() else 1,
                 })
         logger.info(f"구글시트에서 {len(accounts)}개 계정 로드")
         return accounts
@@ -536,3 +537,56 @@ def _solve_text_captcha(driver, _log):
     except Exception as e:
         _log(f"텍스트 캡차 실패: {str(e)[:60]}")
     return False
+
+
+# ═══════════════════════════════════════════════
+# 카페 접속
+# ═══════════════════════════════════════════════
+
+def visit_cafe(driver, account, log_fn=None):
+    """
+    로그인된 드라이버로 카페 접속.
+    반환: {"ok": bool, "msg": str, "cafe_id": str, "menu_id": str}
+    """
+    _log = log_fn or (lambda msg: logger.info(msg))
+    cafe_url = account.get("cafe_url", "")
+    menu_id = account.get("menu_id", "")
+
+    if not cafe_url:
+        return {"ok": False, "msg": "카페 URL 없음"}
+
+    try:
+        _log(f"카페 접속: {cafe_url}")
+        driver.get(cafe_url)
+        time.sleep(3)
+        dismiss_alert(driver)
+
+        url, page = get_page_safe(driver)
+
+        # 카페 접속 확인
+        if "cafe.naver.com" not in url:
+            return {"ok": False, "msg": f"카페 접속 실패 (URL: {url[:50]})"}
+
+        # 카페 가입 여부 확인 — 가입 버튼이 보이면 미가입
+        join_btns = driver.find_elements(By.CSS_SELECTOR, ".btn_join, a[href*='join']")
+        is_member = len(join_btns) == 0
+
+        if not is_member:
+            _log("카페 미가입 상태")
+            return {"ok": False, "msg": "카페 미가입", "need_join": True}
+
+        _log("카페 접속 성공 (가입 확인)")
+
+        # 메뉴 ID가 있으면 해당 게시판으로 이동
+        if menu_id:
+            board_url = f"{cafe_url}?iframe_url=/ArticleList.nhn%3Fsearch.clubid=%26search.menuid={menu_id}"
+            driver.get(board_url)
+            time.sleep(2)
+            _log(f"지정 게시판 이동: 메뉴ID={menu_id}")
+            return {"ok": True, "msg": f"카페 접속 + 게시판 이동 (메뉴ID: {menu_id})", "menu_id": menu_id}
+
+        # 메뉴 ID 없으면 자동 탐색은 나중에 구현
+        return {"ok": True, "msg": "카페 접속 성공 (게시판 미지정)", "menu_id": ""}
+
+    except Exception as e:
+        return {"ok": False, "msg": f"카페 접속 에러: {str(e)[:60]}"}
