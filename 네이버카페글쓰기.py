@@ -513,7 +513,7 @@ class CafeWriterTab(QWidget):
         worker_group = QGroupBox("워커 설정")
         wkg = QGridLayout(worker_group)
         wkg.addWidget(QLabel("워커 수:"), 0, 0)
-        self.worker_slider = LabeledSlider(1, 60, 50)
+        self.worker_slider = LabeledSlider(1, 50, 50)
         wkg.addWidget(self.worker_slider, 0, 1, 1, 2)
         left_layout.addWidget(worker_group)
 
