@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QSpinBox, QCheckBox, QGroupBox, QSlider,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QSplitter, QFrame, QFileDialog, QMessageBox,
-    QProgressBar, QAbstractItemView
+    QProgressBar, QAbstractItemView, QScrollArea
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QColor
@@ -78,6 +78,15 @@ QLineEdit, QPlainTextEdit, QComboBox, QSpinBox {
     border-radius: 4px;
     padding: 5px 8px;
     font-size: 12px;
+}
+QSpinBox::up-button {
+    width: 0; border: none;
+}
+QSpinBox::down-button {
+    width: 0; border: none;
+}
+QSpinBox::up-arrow, QSpinBox::down-arrow {
+    image: none; width: 0; height: 0;
 }
 QLineEdit:focus, QPlainTextEdit:focus {
     border: 1px solid #4a6cf7;
@@ -191,6 +200,26 @@ QStatusBar {
 QSplitter::handle {
     background-color: #d0d0d8;
     width: 2px;
+}
+QScrollArea {
+    background-color: transparent;
+    border: none;
+}
+QScrollBar:vertical {
+    background: #f0f0f4;
+    width: 8px;
+    border-radius: 4px;
+}
+QScrollBar::handle:vertical {
+    background: #c0c0cc;
+    border-radius: 4px;
+    min-height: 30px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #a0a0b0;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
 }
 QSlider::groove:horizontal {
     height: 6px;
@@ -341,7 +370,7 @@ class CafeWriterTab(QWidget):
         ag.addLayout(proxy_btn_layout, 1, 2)
 
         ag.addWidget(QLabel("워커 수:"), 2, 0)
-        self.worker_slider = LabeledSlider(1, 20, 3)
+        self.worker_slider = LabeledSlider(1, 60, 50)
         ag.addWidget(self.worker_slider, 2, 1, 1, 2)
 
         left_layout.addWidget(account_group)
@@ -417,12 +446,42 @@ class CafeWriterTab(QWidget):
         wg.addWidget(self.write_mode, 2, 1, 1, 2)
 
         wg.addWidget(QLabel("페이지 범위:"), 3, 0)
-        self.page_range = RangeSliderPair(1, 100, 1, 10)
-        wg.addWidget(self.page_range, 3, 1, 1, 2)
+        page_range_layout = QHBoxLayout()
+        self.page_lo = QSpinBox()
+        self.page_lo.setRange(1, 9999)
+        self.page_lo.setValue(1)
+        page_range_layout.addWidget(self.page_lo)
+        lbl_p_tilde = QLabel("~")
+        lbl_p_tilde.setFixedWidth(20)
+        lbl_p_tilde.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        page_range_layout.addWidget(lbl_p_tilde)
+        self.page_hi = QSpinBox()
+        self.page_hi.setRange(1, 9999)
+        self.page_hi.setValue(10)
+        page_range_layout.addWidget(self.page_hi)
+        lbl_p_unit = QLabel("")
+        lbl_p_unit.setFixedWidth(20)
+        page_range_layout.addWidget(lbl_p_unit)
+        wg.addLayout(page_range_layout, 3, 1, 1, 2)
 
         wg.addWidget(QLabel("딜레이(초):"), 4, 0)
-        self.delay_range = RangeSliderPair(1, 60, 3, 8, "초")
-        wg.addWidget(self.delay_range, 4, 1, 1, 2)
+        delay_range_layout = QHBoxLayout()
+        self.delay_lo = QSpinBox()
+        self.delay_lo.setRange(1, 600)
+        self.delay_lo.setValue(3)
+        delay_range_layout.addWidget(self.delay_lo)
+        lbl_d_tilde = QLabel("~")
+        lbl_d_tilde.setFixedWidth(20)
+        lbl_d_tilde.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        delay_range_layout.addWidget(lbl_d_tilde)
+        self.delay_hi = QSpinBox()
+        self.delay_hi.setRange(1, 600)
+        self.delay_hi.setValue(8)
+        delay_range_layout.addWidget(self.delay_hi)
+        lbl_d_unit = QLabel("초")
+        lbl_d_unit.setFixedWidth(20)
+        delay_range_layout.addWidget(lbl_d_unit)
+        wg.addLayout(delay_range_layout, 4, 1, 1, 2)
 
         self.chk_allow_comment = QCheckBox("댓글허용")
         self.chk_allow_comment.setChecked(True)
@@ -483,7 +542,14 @@ class CafeWriterTab(QWidget):
         auxg.addWidget(self.captcha_key, 5, 1)
 
         left_layout.addWidget(aux_group)
-        left_layout.addStretch()
+
+        # 왼쪽 패널을 스크롤 영역으로 감싸기
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setWidget(left_panel)
+        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setMinimumWidth(420)
 
         # ══════════════════════════════════
         # 우측: 실행 / 모니터링 패널
@@ -583,7 +649,7 @@ class CafeWriterTab(QWidget):
         right_layout.addWidget(log_group)
 
         # 스플리터 조립
-        splitter.addWidget(left_panel)
+        splitter.addWidget(left_scroll)
         splitter.addWidget(right_panel)
         splitter.setStretchFactor(0, 4)
         splitter.setStretchFactor(1, 6)
@@ -640,10 +706,10 @@ class CafeWriterTab(QWidget):
 
         mode = self.write_mode.currentText()
         checked = [n for n, cb in self.grade_checks.items() if cb.isChecked()]
-        plo = self.page_range.slider_lo.value()
-        phi = self.page_range.slider_hi.value()
-        dlo = self.delay_range.slider_lo.value()
-        dhi = self.delay_range.slider_hi.value()
+        plo = self.page_lo.value()
+        phi = self.page_hi.value()
+        dlo = self.delay_lo.value()
+        dhi = self.delay_hi.value()
 
         self._log(f"작업 시작 — 워커 {wc}개 / 모드: {mode}")
         self._log(f"페이지 {plo}~{phi} / 딜레이 {dlo}~{dhi}초")
@@ -727,7 +793,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("네이버 카페 자동화 프로그램 (6종)  |  SOFTCAT")
-        self.setMinimumSize(1200, 800)
+        self.setMinimumSize(1200, 700)
         self.resize(1400, 900)
 
         central = QWidget()
