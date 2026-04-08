@@ -444,6 +444,10 @@ class LoginWorkerThread(QThread):
         import concurrent.futures
         count = min(self.worker_count, len(self.accounts), len(self.proxies))
 
+        # ── 초기 정리 ──
+        self.log_signal.emit("이전 세션 정리 중...")
+        func.cleanup_workers()
+
         # ── 1단계: 로그인 순차 실행 ──
         self.log_signal.emit("=== 1단계: 로그인 (순차) ===")
         for i in range(count):

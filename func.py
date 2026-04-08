@@ -148,17 +148,59 @@ def save_new_password(nid, new_pw):
 # 브라우저 생성
 # ═══════════════════════════════════════════════
 
+def cleanup_workers():
+    """이전 실행에서 남은 크롬 프로세스 및 임시 폴더 정리."""
+    import subprocess, shutil, tempfile, glob
+    # 크롬/크롬드라이버 프로세스 종료
+    for proc_name in ["chrome.exe", "chromedriver.exe"]:
+        try:
+            subprocess.run(["taskkill", "/F", "/IM", proc_name, "/T"],
+                           capture_output=True, timeout=5)
+        except:
+            pass
+    time.sleep(1)
+    # 임시 폴더 정리
+    tmp = tempfile.gettempdir()
+    for d in glob.glob(os.path.join(tmp, "uc_worker_*")):
+        try:
+            shutil.rmtree(d, ignore_errors=True)
+        except:
+            pass
+    logger.info("워커 정리 완료")
+
+
 def create_driver(proxy_str=None, worker_id=0, chrome_version=145):
     import tempfile
     opts = uc.ChromeOptions()
     if proxy_str:
         opts.add_argument(f"--proxy-server={proxy_str}")
     user_data = os.path.join(tempfile.gettempdir(), f"uc_worker_{worker_id}")
-    driver = uc.Chrome(options=opts, version_main=chrome_version, user_data_dir=user_data)
-    driver.set_window_size(1920, 1080)
-    driver.set_page_load_timeout(20)
-    driver.implicitly_wait(5)
-    return driver
+
+    # 생성 시도, 실패하면 정리 후 재시도
+    for attempt in range(2):
+        try:
+            driver = uc.Chrome(options=opts, version_main=chrome_version, user_data_dir=user_data)
+            driver.set_window_size(1920, 1080)
+            driver.set_page_load_timeout(20)
+            driver.implicitly_wait(5)
+            return driver
+        except Exception as e:
+            if attempt == 0:
+                logger.warning(f"드라이버 생성 실패 (워커#{worker_id}), 정리 후 재시도: {str(e)[:40]}")
+                import subprocess, shutil
+                try:
+                    subprocess.run(["taskkill", "/F", "/IM", "chrome.exe", "/T"],
+                                   capture_output=True, timeout=5)
+                except:
+                    pass
+                time.sleep(1)
+                try:
+                    shutil.rmtree(user_data, ignore_errors=True)
+                except:
+                    pass
+                time.sleep(1)
+            else:
+                raise
 
 
 # ═══════════════════════════════════════════════
