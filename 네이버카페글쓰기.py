@@ -614,6 +614,17 @@ class CafeWriterTab(QWidget):
 
         left_layout.addWidget(grade_group)
 
+        # ── 카페 설정 ──
+        cafe_opt_group = QGroupBox("카페 설정")
+        cog = QVBoxLayout(cafe_opt_group)
+        self.chk_auto_join = QCheckBox("카페 미가입 시 자동 가입")
+        self.chk_auto_join.setChecked(True)
+        cog.addWidget(self.chk_auto_join)
+        self.chk_grade_check = QCheckBox("등급 체크 후 글쓰기 (게시판 자동 탐색)")
+        self.chk_grade_check.setChecked(True)
+        cog.addWidget(self.chk_grade_check)
+        left_layout.addWidget(cafe_opt_group)
+
         # 왼쪽 패널을 스크롤 영역으로 감싸기
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
