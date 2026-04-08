@@ -631,7 +631,13 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
                 clicked = True
                 _log("나의활동 JS 호출 성공")
             except:
-                _log("나의활동 실패")
+                # 디버깅: iframe 안 소스 저장
+                try:
+                    with open("iframe_debug.html", "w", encoding="utf-8") as f:
+                        f.write(driver.page_source)
+                    _log(f"나의활동 실패 - iframe_debug.html 저장됨, URL: {driver.current_url}")
+                except:
+                    _log("나의활동 실패")
                 driver.switch_to.default_content()
                 return {"my_grade": -1, "my_grade_text": "", "grades": {}}
 
