@@ -564,8 +564,8 @@ def _get_grade_info(driver, _log):
             f.write(driver.page_source)
         _log("grade_debug.html 저장됨")
 
-        # 등급 목록 파싱 시도
-        grade_rows = driver.find_elements(By.CSS_SELECTOR, ".grade_row, tr[class*='grade'], li[class*='grade'], .level_item, .grade_item")
+        # 등급 목록 파싱
+        grade_rows = driver.find_elements(By.CSS_SELECTOR, ".tbl_role tr th strong.level_icon_area")
         if grade_rows:
             for idx, row in enumerate(grade_rows):
                 txt = row.text.strip()
