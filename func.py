@@ -557,27 +557,20 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
                     break
         dismiss_alert(driver)
 
-        # 나의활동 클릭 (최대 2회 시도)
+        # 나의활동 클릭 (JS 직접 호출)
         clicked = False
         for attempt in range(2):
-            tabs = driver.find_elements(By.CSS_SELECTOR, "a, button, span")
-            for tab in tabs:
-                try:
-                    txt = tab.text.strip()
-                    if "나의활동" in txt and tab.is_displayed():
-                        tab.click()
-                        time.sleep(3)
-                        clicked = True
-                        _log("나의활동 클릭 성공")
-                        break
-                except:
-                    continue
-            if clicked:
+            try:
+                driver.execute_script("showMyAction();")
+                time.sleep(3)
+                clicked = True
+                _log("나의활동 호출 성공")
                 break
-            time.sleep(2)
+            except:
+                time.sleep(2)
 
         if not clicked:
-            _log("나의활동 버튼 못 찾음")
+            _log("나의활동 호출 실패")
             return {"my_grade": -1, "my_grade_text": "", "grades": {}}
 
         # 등급 안내 클릭 + 파싱
@@ -595,27 +588,20 @@ def _get_grade_info(driver, _log):
     grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}}
     original_handle = driver.current_window_handle
     try:
-        # "등급 안내" 링크 찾기 (최대 5초 대기)
+        # "등급 안내" JS 직접 호출 (최대 5초 대기)
         clicked = False
         for _ in range(10):
-            links = driver.find_elements(By.CSS_SELECTOR, "a")
-            for link in links:
-                try:
-                    txt = link.text.strip()
-                    if ("등급 안내" in txt or "등급안내" in txt) and link.is_displayed():
-                        link.click()
-                        time.sleep(2)
-                        _log("등급 안내 클릭")
-                        clicked = True
-                        break
-                except:
-                    continue
-            if clicked:
+            try:
+                driver.execute_script("viewMyMemberLevel();")
+                time.sleep(2)
+                _log("등급 안내 호출")
+                clicked = True
                 break
-            time.sleep(0.5)
+            except:
+                time.sleep(0.5)
 
         if not clicked:
-            _log("등급 안내 링크 못 찾음")
+            _log("등급 안내 호출 실패")
             return grade_info
 
         # 새 창/팝업으로 전환
