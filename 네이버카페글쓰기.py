@@ -470,12 +470,17 @@ class LoginWorkerThread(QThread):
 
                 # 로그인 성공 시 카페 접속
                 if result["ok"] and acc.get("cafe_url"):
-                    cafe_result = func.visit_cafe(driver, acc, log_fn)
-                    self.log_signal.emit(f"워커#{i+1} [{nid}] 카페: {cafe_result['msg']}")
-                    if cafe_result.get("ok"):
-                        self.worker_update.emit(i, nid, proxy, "[성공] 카페접속", cafe_result["msg"][:30])
-                    else:
-                        self.worker_update.emit(i, nid, proxy, "[실패] 카페접속", cafe_result["msg"][:30])
+                    try:
+                        cafe_result = func.visit_cafe(driver, acc, log_fn)
+                        self.log_signal.emit(f"워커#{i+1} [{nid}] 카페: {cafe_result['msg']}")
+                        if cafe_result.get("ok"):
+                            self.worker_update.emit(i, nid, proxy, "[성공] 카페접속", cafe_result["msg"][:30])
+                        else:
+                            self.worker_update.emit(i, nid, proxy, "[실패] 카페접속", cafe_result["msg"][:30])
+                    except Exception as ce:
+                        self.log_signal.emit(f"워커#{i+1} [{nid}] 카페 접속 에러: {str(ce)[:60]}")
+                elif result["ok"]:
+                    self.log_signal.emit(f"워커#{i+1} [{nid}] 카페 URL 없음 - 스킵")
 
                 # 실패한 창 닫기 (성공/생년월일은 유지)
                 if result.get("error") in ("blocked_phone", "permanent_ban", "login_fail", "exception"):
