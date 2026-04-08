@@ -602,7 +602,8 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
         except:
             _log("iframe 없음 - 메인 프레임에서 진행")
 
-        # 나의활동 클릭
+        # 나의활동 클릭 (메인 프레임에서)
+        driver.switch_to.default_content()
         clicked = False
         for _ in range(10):
             try:
@@ -611,7 +612,7 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
                     try:
                         if "나의활동" in btn.text.strip() and btn.is_displayed():
                             btn.click()
-                            time.sleep(2)
+                            time.sleep(3)
                             clicked = True
                             _log("나의활동 클릭 성공")
                             break
@@ -624,24 +625,17 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
             time.sleep(0.5)
 
         if not clicked:
-            # JS 폴백
-            try:
-                driver.execute_script("showMyAction();")
-                time.sleep(2)
-                clicked = True
-                _log("나의활동 JS 호출 성공")
-            except:
-                # 디버깅: iframe 안 소스 저장
-                try:
-                    with open("iframe_debug.html", "w", encoding="utf-8") as f:
-                        f.write(driver.page_source)
-                    _log(f"나의활동 실패 - iframe_debug.html 저장됨, URL: {driver.current_url}")
-                except:
-                    _log("나의활동 실패")
-                driver.switch_to.default_content()
-                return {"my_grade": -1, "my_grade_text": "", "grades": {}}
+            _log("나의활동 실패")
+            return {"my_grade": -1, "my_grade_text": "", "grades": {}}
 
-        # 등급 안내 클릭
+        # iframe 전환 후 등급 안내 클릭
+        try:
+            iframe = driver.find_element(By.CSS_SELECTOR, "iframe#cafe_main")
+            driver.switch_to.frame(iframe)
+            time.sleep(1)
+        except:
+            pass
+
         original_handles = set(driver.window_handles)
         grade_clicked = False
         for _ in range(10):
