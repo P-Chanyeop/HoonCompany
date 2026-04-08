@@ -586,7 +586,21 @@ def visit_cafe(driver, account, log_fn=None):
             _log("카페 미가입 상태")
             return {"ok": False, "msg": "카페 미가입", "need_join": True}
 
-        _log("카페 접속 성공 (가입 확인)")
+        _log("카페 가입 확인 - 나의활동 확인 중...")
+        # 나의활동 클릭
+        try:
+            tabs = driver.find_elements(By.CSS_SELECTOR, "a, button, span")
+            for tab in tabs:
+                try:
+                    if "나의활동" in tab.text.strip():
+                        tab.click()
+                        time.sleep(2)
+                        _log("나의활동 페이지 진입")
+                        break
+                except:
+                    continue
+        except:
+            pass
 
         # 메뉴 ID가 있으면 해당 게시판으로 이동
         if menu_id:
