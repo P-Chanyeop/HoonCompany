@@ -628,37 +628,57 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
             _log("나의활동 실패")
             return {"my_grade": -1, "my_grade_text": "", "grades": {}}
 
-        # iframe 전환 후 등급 안내 클릭
-        try:
-            iframe = driver.find_element(By.CSS_SELECTOR, "iframe#cafe_main")
-            driver.switch_to.frame(iframe)
-            time.sleep(1)
-        except:
-            pass
+        # 나의활동 클릭 후 iframe 리로드 대기
+        time.sleep(2)
 
+        # 등급 안내 클릭 — 메인 프레임에서 먼저 시도, 실패하면 iframe에서 시도
         original_handles = set(driver.window_handles)
         grade_clicked = False
-        for _ in range(10):
+
+        # 메인 프레임에서 시도
+        driver.switch_to.default_content()
+        for _ in range(5):
             try:
-                links = driver.find_elements(By.CSS_SELECTOR, "a")
-                for link in links:
-                    try:
-                        txt = link.text.strip()
-                        if ("등급 안내" in txt or "등급안내" in txt) and link.is_displayed():
-                            link.click()
-                            time.sleep(2)
-                            grade_clicked = True
-                            _log("등급 안내 클릭 성공")
-                            break
-                    except:
-                        continue
-                if grade_clicked:
+                link = driver.find_element(By.CSS_SELECTOR, "a.gm-tcol-c")
+                if "등급" in link.text:
+                    link.click()
+                    time.sleep(2)
+                    grade_clicked = True
+                    _log("등급 안내 클릭 성공 (메인)")
                     break
             except:
                 pass
             time.sleep(0.5)
 
+        # 메인에서 못 찾으면 iframe에서 시도
         if not grade_clicked:
+            try:
+                iframe = driver.find_element(By.CSS_SELECTOR, "iframe#cafe_main")
+                driver.switch_to.frame(iframe)
+                time.sleep(1)
+                for _ in range(5):
+                    try:
+                        link = driver.find_element(By.CSS_SELECTOR, "a.gm-tcol-c")
+                        if "등급" in link.text:
+                            link.click()
+                            time.sleep(2)
+                            grade_clicked = True
+                            _log("등급 안내 클릭 성공 (iframe)")
+                            break
+                    except:
+                        pass
+                    time.sleep(0.5)
+            except:
+                pass
+
+        # 그래도 못 찾으면 JS 폴백 (메인 프레임에서)
+        if not grade_clicked:
+            driver.switch_to.default_content()
+            try:
+                iframe = driver.find_element(By.CSS_SELECTOR, "iframe#cafe_main")
+                driver.switch_to.frame(iframe)
+            except:
+                pass
             try:
                 driver.execute_script("viewMyMemberLevel();")
                 time.sleep(2)
