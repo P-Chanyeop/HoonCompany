@@ -611,12 +611,17 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
 
         # 등급 안내 페이지 직접 접속
         grade_url = f"https://cafe.naver.com/CafeGradeInfoView.nhn?clubid={clubid}"
+        _log(f"등급 페이지 접속: {grade_url}")
         driver.get(grade_url)
-        time.sleep(3)
 
-        # 등급 파싱
+        # 최대 10초 대기 — level_icon_area 나타날 때까지
         grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}}
-        grade_rows = driver.find_elements(By.CSS_SELECTOR, "strong.level_icon_area")
+        for _ in range(20):
+            time.sleep(0.5)
+            grade_rows = driver.find_elements(By.CSS_SELECTOR, "strong.level_icon_area")
+            if grade_rows:
+                break
+
         if grade_rows:
             for idx, row in enumerate(grade_rows):
                 txt = row.text.strip()
@@ -624,7 +629,14 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
                     grade_info["grades"][idx] = txt
                     _log(f"등급 {idx}: {txt}")
         else:
-            _log("등급 행 못 찾음")
+            # 디버깅
+            try:
+                with open("grade_debug.html", "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+                _log(f"등급 행 못 찾음 - 현재 URL: {driver.current_url}")
+                _log("grade_debug.html 저장됨")
+            except:
+                _log("등급 행 못 찾음")
 
         _log(f"등급 조회 완료: {len(grade_info['grades'])}개 등급")
         return grade_info
