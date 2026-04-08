@@ -548,19 +548,31 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
     _log = log_fn or (lambda msg: logger.info(msg))
     try:
         driver.get(cafe_url)
-        time.sleep(3)
+        time.sleep(5)
         dismiss_alert(driver)
 
-        # 나의활동 클릭
-        tabs = driver.find_elements(By.CSS_SELECTOR, "a, button, span")
-        for tab in tabs:
-            try:
-                if "나의활동" in tab.text.strip():
-                    tab.click()
-                    time.sleep(2)
-                    break
-            except:
-                continue
+        # 나의활동 클릭 (최대 2회 시도)
+        clicked = False
+        for attempt in range(2):
+            tabs = driver.find_elements(By.CSS_SELECTOR, "a, button, span")
+            for tab in tabs:
+                try:
+                    txt = tab.text.strip()
+                    if "나의활동" in txt and tab.is_displayed():
+                        tab.click()
+                        time.sleep(3)
+                        clicked = True
+                        _log("나의활동 클릭 성공")
+                        break
+                except:
+                    continue
+            if clicked:
+                break
+            time.sleep(2)
+
+        if not clicked:
+            _log("나의활동 버튼 못 찾음")
+            return {"my_grade": -1, "my_grade_text": "", "grades": {}}
 
         # 등급 안내 클릭 + 파싱
         time.sleep(1)
