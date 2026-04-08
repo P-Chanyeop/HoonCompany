@@ -616,8 +616,12 @@ def visit_cafe(driver, account, log_fn=None):
         if "cafe.naver.com" not in url:
             return {"ok": False, "msg": f"카페 접속 실패 (URL: {url[:50]})"}
 
-        # 카페 가입 여부 확인 — Sidebar_btn__ 클래스 버튼 텍스트로 판별
+        # 카페 가입 여부 확인
         is_member = False
+        # 디버깅: 카페 페이지 소스 저장
+        with open("cafe_debug.html", "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+
         try:
             sidebar_btns = driver.find_elements(By.CSS_SELECTOR, "[class*='Sidebar_btn__']")
             for btn in sidebar_btns:
@@ -630,6 +634,13 @@ def visit_cafe(driver, account, log_fn=None):
                     break
         except:
             pass
+
+        # 폴백: 페이지 소스에서 판별
+        if not is_member:
+            if "카페 글쓰기" in page or "Sidebar_btn__write" in page:
+                is_member = True
+            elif "나의활동" in page:
+                is_member = True
 
         if not is_member:
             _log("카페 미가입 상태")

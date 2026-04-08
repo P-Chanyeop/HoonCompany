@@ -441,8 +441,11 @@ class LoginWorkerThread(QThread):
         self._stop_flag = True
 
     def run(self):
+        import concurrent.futures
         count = min(self.worker_count, len(self.accounts), len(self.proxies))
 
+        # ── 1단계: 로그인 순차 실행 ──
+        self.log_signal.emit("=== 1단계: 로그인 (순차) ===")
         for i in range(count):
             if self._stop_flag:
                 break
@@ -465,43 +468,54 @@ class LoginWorkerThread(QThread):
                 if result["ok"]:
                     self.worker_update.emit(i, "로그인 성공")
                     self.log_signal.emit(f"워커#{i+1} [성공] [{nid}] {result['msg']}")
-
-                    # 카페 접속
-                    if acc.get("cafe_url"):
-                        self.worker_update.emit(i, "카페 접속 중...")
-                        try:
-                            cafe_result = func.visit_cafe(driver, acc, log_fn)
-                            self.log_signal.emit(f"워커#{i+1} [{nid}] 카페: {cafe_result['msg']}")
-                            if cafe_result.get("ok"):
-                                self.worker_update.emit(i, "카페 접속 완료")
-                            else:
-                                self.worker_update.emit(i, f"카페 실패: {cafe_result['msg'][:20]}")
-                        except Exception as ce:
-                            self.log_signal.emit(f"워커#{i+1} [{nid}] 카페 에러: {str(ce)[:60]}")
-                            self.worker_update.emit(i, "카페 접속 에러")
-                    else:
-                        self.worker_update.emit(i, "카페 URL 없음")
+                    self.drivers.append((i, acc, driver))
                 else:
                     self.worker_update.emit(i, result["msg"][:30])
                     self.log_signal.emit(f"워커#{i+1} [실패] [{nid}] {result['msg']}")
-
-                # 실패한 창 닫기
-                if result.get("error") in ("blocked_phone", "permanent_ban", "login_fail", "exception"):
-                    try:
-                        driver.quit()
-                    except:
-                        pass
-                else:
-                    self.drivers.append((i, driver))
+                    if result.get("error") in ("blocked_phone", "permanent_ban", "login_fail", "exception"):
+                        try:
+                            driver.quit()
+                        except:
+                            pass
+                    else:
+                        self.drivers.append((i, acc, driver))
 
             except Exception as e:
                 self.log_signal.emit(f"워커#{i+1} [실패] [{nid}] {str(e)[:60]}")
                 self.worker_update.emit(i, f"에러: {str(e)[:20]}")
 
-        # 결과 집계
+        # 로그인 결과 집계
         ok = len([r for r in self.results if r["ok"]])
         total = len(self.results)
-        self.log_signal.emit(f"=== 완료: 성공 {ok}/{total} ===")
+        self.log_signal.emit(f"=== 로그인 완료: 성공 {ok}/{total} ===")
+
+        # ── 2단계: 카페 작업 병렬 실행 ──
+        logged_in = [(i, acc, drv) for i, acc, drv in self.drivers if any(
+            r["ok"] and r["worker"] == i for r in self.results)]
+
+        if logged_in and not self._stop_flag:
+            self.log_signal.emit(f"=== 2단계: 카페 접속 (병렬 {len(logged_in)}개) ===")
+
+            def cafe_task(worker_idx, acc, drv):
+                log_fn = lambda msg: self.log_signal.emit(f"  워커#{worker_idx+1} {msg}")
+                self.worker_update.emit(worker_idx, "카페 접속 중...")
+                try:
+                    cafe_result = func.visit_cafe(drv, acc, log_fn)
+                    if cafe_result.get("ok"):
+                        self.worker_update.emit(worker_idx, "카페 접속 완료")
+                    else:
+                        self.worker_update.emit(worker_idx, f"카페: {cafe_result['msg'][:20]}")
+                    self.log_signal.emit(f"워커#{worker_idx+1} [{acc['id']}] 카페: {cafe_result['msg']}")
+                except Exception as ce:
+                    self.worker_update.emit(worker_idx, "카페 접속 에러")
+                    self.log_signal.emit(f"워커#{worker_idx+1} [{acc['id']}] 카페 에러: {str(ce)[:60]}")
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(logged_in)) as pool:
+                futures = [pool.submit(cafe_task, i, acc, drv) for i, acc, drv in logged_in]
+                concurrent.futures.wait(futures)
+
+            self.log_signal.emit("=== 카페 접속 완료 ===")
+
         self.finished_signal.emit(self.results)
 
 # 1순위: 카페 글쓰기 탭 (좌우 스플리터 구조 유지)
