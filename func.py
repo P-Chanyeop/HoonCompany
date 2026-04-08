@@ -543,6 +543,35 @@ def _solve_text_captcha(driver, _log):
 # 카페 접속
 # ═══════════════════════════════════════════════
 
+def get_cafe_grades(driver, cafe_url, log_fn=None):
+    """카페에 접속해서 나의활동 → 등급 안내 → 등급 목록 파싱."""
+    _log = log_fn or (lambda msg: logger.info(msg))
+    try:
+        driver.get(cafe_url)
+        time.sleep(3)
+        dismiss_alert(driver)
+
+        # 나의활동 클릭
+        tabs = driver.find_elements(By.CSS_SELECTOR, "a, button, span")
+        for tab in tabs:
+            try:
+                if "나의활동" in tab.text.strip():
+                    tab.click()
+                    time.sleep(2)
+                    break
+            except:
+                continue
+
+        # 등급 안내 클릭 + 파싱
+        time.sleep(1)
+        grade_info = _get_grade_info(driver, _log)
+        _log(f"등급 조회 완료: {len(grade_info['grades'])}개 등급")
+        return grade_info
+    except Exception as e:
+        _log(f"등급 조회 실패: {str(e)[:60]}")
+        return {"my_grade": -1, "my_grade_text": "", "grades": {}}
+
+
 def _get_grade_info(driver, _log):
     """등급 안내 클릭 → 등급 목록 파싱. 디버깅용 HTML 저장."""
     grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}}
@@ -648,25 +677,7 @@ def visit_cafe(driver, account, log_fn=None):
             _log("카페 미가입 상태")
             return {"ok": False, "msg": "카페 미가입", "need_join": True}
 
-        _log("카페 가입 확인 - 나의활동 확인 중...")
-        # 나의활동 클릭
-        try:
-            tabs = driver.find_elements(By.CSS_SELECTOR, "a, button, span")
-            for tab in tabs:
-                try:
-                    if "나의활동" in tab.text.strip():
-                        tab.click()
-                        time.sleep(2)
-                        _log("나의활동 페이지 진입")
-                        break
-                except:
-                    continue
-        except:
-            pass
-
-        # 등급 안내 클릭 → 등급 정보 파싱
-        time.sleep(1)
-        grade_info = _get_grade_info(driver, _log)
+        _log("카페 가입 확인")
 
         # 메뉴 ID가 있으면 해당 게시판으로 이동
         if menu_id:
@@ -674,10 +685,10 @@ def visit_cafe(driver, account, log_fn=None):
             driver.get(board_url)
             time.sleep(2)
             _log(f"지정 게시판 이동: 메뉴ID={menu_id}")
-            return {"ok": True, "msg": f"카페 접속 + 게시판 이동 (메뉴ID: {menu_id})", "menu_id": menu_id, "grade_info": grade_info}
+            return {"ok": True, "msg": f"카페 접속 + 게시판 이동 (메뉴ID: {menu_id})", "menu_id": menu_id}
 
         # 메뉴 ID 없으면 자동 탐색은 나중에 구현
-        return {"ok": True, "msg": "카페 접속 성공 (게시판 미지정)", "menu_id": "", "grade_info": grade_info}
+        return {"ok": True, "msg": "카페 접속 성공 (게시판 미지정)", "menu_id": ""}
 
     except Exception as e:
         return {"ok": False, "msg": f"카페 접속 에러: {str(e)[:60]}"}

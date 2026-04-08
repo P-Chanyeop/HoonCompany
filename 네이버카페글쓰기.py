@@ -494,7 +494,35 @@ class LoginWorkerThread(QThread):
             r["ok"] and r["worker"] == i for r in self.results)]
 
         if logged_in and not self._stop_flag:
-            self.log_signal.emit(f"=== 2단계: 카페 접속 (병렬 {len(logged_in)}개) ===")
+            # ── 2단계: 카페별 등급 조회 (캐시) ──
+            cafe_grades = {}  # {cafe_url: grade_info}
+            unique_cafes = set(acc.get("cafe_url", "") for _, acc, _ in logged_in if acc.get("cafe_url"))
+
+            if unique_cafes:
+                self.log_signal.emit(f"=== 2단계: 카페 등급 조회 ({len(unique_cafes)}개 카페) ===")
+                for cafe_url in unique_cafes:
+                    if self._stop_flag:
+                        break
+                    # 해당 카페에 접속 가능한 워커 찾기
+                    for w_idx, w_acc, w_drv in logged_in:
+                        if w_acc.get("cafe_url") == cafe_url:
+                            self.log_signal.emit(f"  카페 등급 조회: {cafe_url} (워커#{w_idx+1} 사용)")
+                            try:
+                                grade_info = func.get_cafe_grades(
+                                    w_drv, cafe_url,
+                                    lambda msg: self.log_signal.emit(f"    {msg}")
+                                )
+                                if grade_info["grades"]:
+                                    cafe_grades[cafe_url] = grade_info
+                                    self.log_signal.emit(f"  등급 조회 성공: {list(grade_info['grades'].values())}")
+                                    break
+                                else:
+                                    self.log_signal.emit(f"  등급 조회 실패 - 다른 워커로 재시도")
+                            except:
+                                continue
+
+            # ── 3단계: 카페 접속 병렬 실행 ──
+            self.log_signal.emit(f"=== 3단계: 카페 접속 (병렬 {len(logged_in)}개) ===")
 
             def cafe_task(worker_idx, acc, drv):
                 log_fn = lambda msg: self.log_signal.emit(f"  워커#{worker_idx+1} {msg}")
