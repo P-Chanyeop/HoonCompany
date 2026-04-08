@@ -614,24 +614,6 @@ class CafeWriterTab(QWidget):
 
         left_layout.addWidget(grade_group)
 
-        # ── 보조조치 설정 ──
-        aux_group = QGroupBox("보조조치 / 카페 설정")
-        auxg = QGridLayout(aux_group)
-
-        self.chk_auto_unblock = QCheckBox("보조조치 자동 해제")
-        self.chk_auto_unblock.setChecked(True)
-        auxg.addWidget(self.chk_auto_unblock, 0, 0, 1, 2)
-
-        self.chk_auto_join = QCheckBox("카페 미가입 시 자동 가입")
-        self.chk_auto_join.setChecked(True)
-        auxg.addWidget(self.chk_auto_join, 1, 0, 1, 2)
-
-        self.chk_grade_check = QCheckBox("등급 체크 후 글쓰기 (게시판 자동 탐색)")
-        self.chk_grade_check.setChecked(True)
-        auxg.addWidget(self.chk_grade_check, 2, 0, 1, 2)
-
-        left_layout.addWidget(aux_group)
-
         # 왼쪽 패널을 스크롤 영역으로 감싸기
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
