@@ -548,7 +548,13 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
     _log = log_fn or (lambda msg: logger.info(msg))
     try:
         driver.get(cafe_url)
-        time.sleep(5)
+        # 최대 5초 대기 — 나의활동 요소 나타나면 바로 진행
+        for _ in range(10):
+            time.sleep(0.5)
+            if driver.find_elements(By.CSS_SELECTOR, "a, span"):
+                page_text = driver.page_source[:3000]
+                if "나의활동" in page_text or "카페 글쓰기" in page_text:
+                    break
         dismiss_alert(driver)
 
         # 나의활동 클릭 (최대 2회 시도)
