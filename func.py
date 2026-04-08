@@ -573,8 +573,9 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
 
 
 def _get_grade_info(driver, _log):
-    """등급 안내 클릭 → 등급 목록 파싱. 디버깅용 HTML 저장."""
+    """등급 안내 클릭 → 팝업 핸들 전환 → 등급 목록 파싱."""
     grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}}
+    original_handle = driver.current_window_handle
     try:
         # "등급 안내" 링크 클릭
         links = driver.find_elements(By.CSS_SELECTOR, "a")
@@ -583,18 +584,22 @@ def _get_grade_info(driver, _log):
                 if "등급 안내" in link.text.strip() or "등급안내" in link.text.strip():
                     link.click()
                     time.sleep(2)
-                    _log("등급 안내 팝업 열림")
+                    _log("등급 안내 클릭")
                     break
             except:
                 continue
 
-        # 디버깅: 페이지/팝업 소스 저장
-        with open("grade_debug.html", "w", encoding="utf-8") as f:
-            f.write(driver.page_source)
-        _log("grade_debug.html 저장됨")
+        # 새 창/팝업으로 전환
+        all_handles = driver.window_handles
+        for handle in all_handles:
+            if handle != original_handle:
+                driver.switch_to.window(handle)
+                time.sleep(1)
+                _log("등급 팝업 창 전환")
+                break
 
         # 등급 목록 파싱
-        grade_rows = driver.find_elements(By.CSS_SELECTOR, ".tbl_role tr th strong.level_icon_area")
+        grade_rows = driver.find_elements(By.CSS_SELECTOR, "strong.level_icon_area")
         if grade_rows:
             for idx, row in enumerate(grade_rows):
                 txt = row.text.strip()
@@ -602,21 +607,21 @@ def _get_grade_info(driver, _log):
                     grade_info["grades"][idx] = txt
                     _log(f"등급 {idx}: {txt}")
         else:
-            _log("등급 행 못 찾음 - grade_debug.html 확인 필요")
+            _log("등급 행 못 찾음")
 
-        # 팝업 닫기
-        try:
-            close_btns = driver.find_elements(By.CSS_SELECTOR, ".btn_close, button[class*='close'], .popup_close")
-            for btn in close_btns:
-                if btn.is_displayed():
-                    btn.click()
-                    time.sleep(0.5)
-                    break
-        except:
-            pass
+        # 팝업 창 닫고 원래 창으로 복귀
+        if driver.current_window_handle != original_handle:
+            driver.close()
+            driver.switch_to.window(original_handle)
+            time.sleep(0.5)
 
     except Exception as e:
         _log(f"등급 정보 파싱 실패: {str(e)[:60]}")
+        # 원래 창으로 복귀
+        try:
+            driver.switch_to.window(original_handle)
+        except:
+            pass
 
     return grade_info
 
