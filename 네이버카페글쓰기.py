@@ -684,16 +684,10 @@ class CafeWriterTab(QWidget):
 
         # 요약
         summary_layout = QHBoxLayout()
-        self.lbl_total = QLabel("전체: 0")
-        self.lbl_running = QLabel("실행: 0")
-        self.lbl_running.setStyleSheet("color: #2e7d32;")
-        self.lbl_success = QLabel("성공: 0")
-        self.lbl_success.setStyleSheet("color: #1565c0;")
-        self.lbl_fail = QLabel("실패: 0")
-        self.lbl_fail.setStyleSheet("color: #c62828;")
-        for lbl in [self.lbl_total, self.lbl_running, self.lbl_success, self.lbl_fail]:
-            lbl.setFont(QFont("", 11, QFont.Weight.Bold))
-            summary_layout.addWidget(lbl)
+        self.lbl_summary = QLabel("성공 0 | 생년월일 0 | 핸드폰 0 | 영구정지 0 | 캡차 0 | 보안인증 0 | 실패 0 / 총 0개")
+        self.lbl_summary.setFont(QFont("Malgun Gothic", 11, QFont.Weight.Bold))
+        self.lbl_summary.setStyleSheet("color: #303050;")
+        summary_layout.addWidget(self.lbl_summary)
         summary_layout.addStretch()
         worker_layout.addLayout(summary_layout)
 
@@ -796,8 +790,7 @@ class CafeWriterTab(QWidget):
             self.worker_table.setItem(i, 5, QTableWidgetItem("-"))
             self.worker_table.setItem(i, 6, QTableWidgetItem("-"))
 
-        self.lbl_total.setText(f"전체: {count}")
-        self.lbl_running.setText(f"실행: 0")
+        self.lbl_summary.setText(f"성공 0 | 생년월일 0 | 핸드폰 0 | 영구정지 0 | 캡차 0 | 보안인증 0 | 실패 0 / 총 {count}개")
         self.progress.setMaximum(count)
         self.progress.setValue(0)
 
@@ -823,11 +816,18 @@ class CafeWriterTab(QWidget):
         self.worker_table.setItem(idx, 3, item)
         self.worker_table.setItem(idx, 6, QTableWidgetItem(detail))
         self.progress.setValue(self.progress.value() + 1)
-        ok_count = len([r for r in self._worker_thread.results if r.get("ok")])
-        self.lbl_success.setText(f"성공: {ok_count}")
-        self.lbl_running.setText(f"실행: {self.progress.value()}")
+        self._update_summary(self._worker_thread.results)
 
     def _on_finished(self, results):
+        self._update_summary(results)
+        total = len(results)
+        ok = len([r for r in results if r["ok"]])
+        self._log(f"=== 결과: {self.lbl_summary.text()} ===")
+        self.btn_start.setEnabled(True)
+        self.btn_pause.setEnabled(False)
+        self.btn_stop.setEnabled(False)
+
+    def _update_summary(self, results):
         ok = len([r for r in results if r["ok"]])
         bday = len([r for r in results if r.get("error") == "blocked_birthday"])
         phone = len([r for r in results if r.get("error") == "blocked_phone"])
@@ -837,12 +837,9 @@ class CafeWriterTab(QWidget):
         fail = len([r for r in results if not r["ok"] and r.get("error") not in
                     ("blocked_birthday", "blocked_phone", "permanent_ban", "captcha", "security")])
         total = len(results)
-        self._log(f"=== 결과: 성공 {ok} | 생년월일 {bday} | 핸드폰(해제불가) {phone} | 영구정지 {perm} | 캡차 {captcha} | 보안인증 {security} | 실패 {fail} / 총 {total}개 ===")
-        self.btn_start.setEnabled(True)
-        self.btn_pause.setEnabled(False)
-        self.btn_stop.setEnabled(False)
-        self.lbl_success.setText(f"성공: {ok}")
-        self.lbl_fail.setText(f"실패: {total - ok}")
+        self.lbl_summary.setText(
+            f"성공 {ok} | 생년월일 {bday} | 핸드폰 {phone} | 영구정지 {perm} | 캡차 {captcha} | 보안인증 {security} | 실패 {fail} / 총 {total}개"
+        )
 
     def _on_stop(self):
         if hasattr(self, '_worker_thread') and self._worker_thread.isRunning():
