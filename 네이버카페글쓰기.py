@@ -602,6 +602,7 @@ class CafeWriterTab(QWidget):
         wg.addWidget(QLabel("작성 모드:"), 0, 0)
         self.write_mode = QComboBox()
         self.write_mode.addItems(["글쓰기", "답글", "글쓰기 + 답글"])
+        self.write_mode.setCurrentIndex(1)
         wg.addWidget(self.write_mode, 0, 1, 1, 2)
 
         wg.addWidget(QLabel("페이지 범위:"), 1, 0)
