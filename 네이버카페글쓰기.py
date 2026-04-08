@@ -599,22 +599,12 @@ class CafeWriterTab(QWidget):
         write_group = QGroupBox("글쓰기 설정")
         wg = QGridLayout(write_group)
 
-        wg.addWidget(QLabel("카페 URL / ID:"), 0, 0)
-        self.cafe_target = QLineEdit()
-        self.cafe_target.setPlaceholderText("카페 URL 또는 카페 ID")
-        wg.addWidget(self.cafe_target, 0, 1, 1, 2)
-
-        wg.addWidget(QLabel("게시판 메뉴ID:"), 1, 0)
-        self.menu_id_edit = QLineEdit()
-        self.menu_id_edit.setPlaceholderText("비워두면 자동 탐색")
-        wg.addWidget(self.menu_id_edit, 1, 1, 1, 2)
-
-        wg.addWidget(QLabel("작성 모드:"), 2, 0)
+        wg.addWidget(QLabel("작성 모드:"), 0, 0)
         self.write_mode = QComboBox()
         self.write_mode.addItems(["글쓰기", "답글", "글쓰기 + 답글"])
-        wg.addWidget(self.write_mode, 2, 1, 1, 2)
+        wg.addWidget(self.write_mode, 0, 1, 1, 2)
 
-        wg.addWidget(QLabel("페이지 범위:"), 3, 0)
+        wg.addWidget(QLabel("페이지 범위:"), 1, 0)
         page_range_layout = QHBoxLayout()
         self.page_lo = QSpinBox()
         self.page_lo.setRange(1, 9999)
@@ -631,9 +621,9 @@ class CafeWriterTab(QWidget):
         lbl_p_unit = QLabel("")
         lbl_p_unit.setFixedWidth(20)
         page_range_layout.addWidget(lbl_p_unit)
-        wg.addLayout(page_range_layout, 3, 1, 1, 2)
+        wg.addLayout(page_range_layout, 1, 1, 1, 2)
 
-        wg.addWidget(QLabel("딜레이(초):"), 4, 0)
+        wg.addWidget(QLabel("딜레이(초):"), 2, 0)
         delay_range_layout = QHBoxLayout()
         self.delay_lo = QSpinBox()
         self.delay_lo.setRange(1, 600)
@@ -650,11 +640,11 @@ class CafeWriterTab(QWidget):
         lbl_d_unit = QLabel("초")
         lbl_d_unit.setFixedWidth(20)
         delay_range_layout.addWidget(lbl_d_unit)
-        wg.addLayout(delay_range_layout, 4, 1, 1, 2)
+        wg.addLayout(delay_range_layout, 2, 1, 1, 2)
 
         self.chk_allow_comment = QCheckBox("댓글허용")
         self.chk_allow_comment.setChecked(True)
-        wg.addWidget(self.chk_allow_comment, 5, 0, 1, 3)
+        wg.addWidget(self.chk_allow_comment, 3, 0, 1, 3)
 
         left_layout.addWidget(write_group)
 
