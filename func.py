@@ -586,41 +586,110 @@ def _solve_text_captcha(driver, _log):
 # ═══════════════════════════════════════════════
 
 def get_cafe_grades(driver, cafe_url, log_fn=None):
-    """카페 등급 목록 파싱 — 등급 안내 페이지 직접 접속."""
+    """카페 등급 조회 — 카페 접속 → iframe 전환 → 나의활동 → 등급 안내 팝업."""
     _log = log_fn or (lambda msg: logger.info(msg))
     try:
-        # 카페 ID 추출 (https://cafe.naver.com/0404ab → 0404ab)
-        cafe_id = cafe_url.rstrip("/").split("/")[-1]
-
-        # 카페 메인 접속해서 clubid 가져오기
         driver.get(cafe_url)
         time.sleep(3)
         dismiss_alert(driver)
 
-        # clubid 추출 (페이지 소스에서)
-        page = driver.page_source
-        clubid = ""
-        match = re.search(r'clubid["\s:=]+(\d+)', page)
-        if match:
-            clubid = match.group(1)
-            _log(f"카페 clubid: {clubid}")
+        # iframe으로 전환 (네이버 카페는 cafe_main iframe 안에 콘텐츠가 있음)
+        try:
+            iframe = driver.find_element(By.CSS_SELECTOR, "iframe#cafe_main")
+            driver.switch_to.frame(iframe)
+            _log("cafe_main iframe 전환")
+            time.sleep(1)
+        except:
+            _log("iframe 없음 - 메인 프레임에서 진행")
 
-        if not clubid:
-            _log("clubid 못 찾음")
-            return {"my_grade": -1, "my_grade_text": "", "grades": {}}
-
-        # 등급 안내 페이지 직접 접속
-        grade_url = f"https://cafe.naver.com/CafeGradeInfoView.nhn?clubid={clubid}"
-        _log(f"등급 페이지 접속: {grade_url}")
-        driver.get(grade_url)
-
-        # 최대 10초 대기 — level_icon_area 나타날 때까지
-        grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}}
-        for _ in range(20):
+        # 나의활동 클릭
+        clicked = False
+        for _ in range(10):
+            try:
+                btns = driver.find_elements(By.CSS_SELECTOR, "button, a")
+                for btn in btns:
+                    try:
+                        if "나의활동" in btn.text.strip() and btn.is_displayed():
+                            btn.click()
+                            time.sleep(2)
+                            clicked = True
+                            _log("나의활동 클릭 성공")
+                            break
+                    except:
+                        continue
+                if clicked:
+                    break
+            except:
+                pass
             time.sleep(0.5)
+
+        if not clicked:
+            # JS 폴백
+            try:
+                driver.execute_script("showMyAction();")
+                time.sleep(2)
+                clicked = True
+                _log("나의활동 JS 호출 성공")
+            except:
+                _log("나의활동 실패")
+                driver.switch_to.default_content()
+                return {"my_grade": -1, "my_grade_text": "", "grades": {}}
+
+        # 등급 안내 클릭
+        original_handles = set(driver.window_handles)
+        grade_clicked = False
+        for _ in range(10):
+            try:
+                links = driver.find_elements(By.CSS_SELECTOR, "a")
+                for link in links:
+                    try:
+                        txt = link.text.strip()
+                        if ("등급 안내" in txt or "등급안내" in txt) and link.is_displayed():
+                            link.click()
+                            time.sleep(2)
+                            grade_clicked = True
+                            _log("등급 안내 클릭 성공")
+                            break
+                    except:
+                        continue
+                if grade_clicked:
+                    break
+            except:
+                pass
+            time.sleep(0.5)
+
+        if not grade_clicked:
+            try:
+                driver.execute_script("viewMyMemberLevel();")
+                time.sleep(2)
+                grade_clicked = True
+                _log("등급 안내 JS 호출 성공")
+            except:
+                _log("등급 안내 실패")
+                driver.switch_to.default_content()
+                return {"my_grade": -1, "my_grade_text": "", "grades": {}}
+
+        # 새 창 전환 (최대 5초 대기)
+        new_handle = None
+        for _ in range(10):
+            new_handles = set(driver.window_handles) - original_handles
+            if new_handles:
+                new_handle = new_handles.pop()
+                break
+            time.sleep(0.5)
+
+        if new_handle:
+            driver.switch_to.window(new_handle)
+            time.sleep(2)
+            _log("등급 팝업 창 전환")
+
+        # 등급 파싱 (최대 5초 대기)
+        grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}}
+        for _ in range(10):
             grade_rows = driver.find_elements(By.CSS_SELECTOR, "strong.level_icon_area")
             if grade_rows:
                 break
+            time.sleep(0.5)
 
         if grade_rows:
             for idx, row in enumerate(grade_rows):
@@ -629,20 +698,33 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
                     grade_info["grades"][idx] = txt
                     _log(f"등급 {idx}: {txt}")
         else:
-            # 디버깅
+            _log("등급 행 못 찾음")
+
+        # 팝업 닫고 원래 창 복귀
+        if new_handle:
             try:
-                with open("grade_debug.html", "w", encoding="utf-8") as f:
-                    f.write(driver.page_source)
-                _log(f"등급 행 못 찾음 - 현재 URL: {driver.current_url}")
-                _log("grade_debug.html 저장됨")
+                driver.close()
             except:
-                _log("등급 행 못 찾음")
+                pass
+            original_handle = [h for h in driver.window_handles if h != new_handle]
+            if original_handle:
+                driver.switch_to.window(original_handle[0])
+
+        # iframe에서 빠져나오기
+        try:
+            driver.switch_to.default_content()
+        except:
+            pass
 
         _log(f"등급 조회 완료: {len(grade_info['grades'])}개 등급")
         return grade_info
 
     except Exception as e:
         _log(f"등급 조회 실패: {str(e)[:60]}")
+        try:
+            driver.switch_to.default_content()
+        except:
+            pass
         return {"my_grade": -1, "my_grade_text": "", "grades": {}}
 
 
