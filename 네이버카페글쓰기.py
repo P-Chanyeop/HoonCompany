@@ -509,27 +509,48 @@ class LoginWorkerThread(QThread):
             unique_cafes = set(acc.get("cafe_url", "") for _, acc, _ in logged_in if acc.get("cafe_url"))
 
             if unique_cafes:
-                self.log_signal.emit(f"=== 2단계: 카페 등급 조회 ({len(unique_cafes)}개 카페) ===")
+                self.log_signal.emit(f"=== 2단계: 카페 등급 조회 ({len(unique_cafes)}개 카페, 병렬) ===")
+
+                # 카페별로 워커 1개씩 배정
+                cafe_worker_map = {}
+                used_workers = set()
                 for cafe_url in unique_cafes:
-                    if self._stop_flag:
-                        break
-                    # 해당 카페에 접속 가능한 워커 찾기
                     for w_idx, w_acc, w_drv in logged_in:
-                        if w_acc.get("cafe_url") == cafe_url:
-                            self.log_signal.emit(f"  카페 등급 조회: {cafe_url} (워커#{w_idx+1} 사용)")
-                            try:
-                                grade_info = func.get_cafe_grades(
-                                    w_drv, cafe_url,
-                                    lambda msg: self.log_signal.emit(f"    {msg}")
-                                )
-                                if grade_info["grades"]:
-                                    cafe_grades[cafe_url] = grade_info
-                                    self.log_signal.emit(f"  등급 조회 성공: {list(grade_info['grades'].values())}")
-                                    break
-                                else:
-                                    self.log_signal.emit(f"  등급 조회 실패 - 다른 워커로 재시도")
-                            except:
-                                continue
+                        if w_acc.get("cafe_url") == cafe_url and w_idx not in used_workers:
+                            cafe_worker_map[cafe_url] = (w_idx, w_drv)
+                            used_workers.add(w_idx)
+                            break
+                    if cafe_url not in cafe_worker_map:
+                        for w_idx, w_acc, w_drv in logged_in:
+                            if w_idx not in used_workers:
+                                cafe_worker_map[cafe_url] = (w_idx, w_drv)
+                                used_workers.add(w_idx)
+                                break
+
+                def grade_task(cafe_url, w_idx, w_drv):
+                    self.log_signal.emit(f"  카페 등급 조회: {cafe_url} (워커#{w_idx+1} 사용)")
+                    try:
+                        grade_info = func.get_cafe_grades(
+                            w_drv, cafe_url,
+                            lambda msg, _w=w_idx: self.log_signal.emit(f"    [워커#{_w+1}] {msg}")
+                        )
+                        if grade_info["grades"]:
+                            return cafe_url, grade_info
+                        self.log_signal.emit(f"  [{cafe_url}] 등급 조회 실패")
+                    except Exception as e:
+                        self.log_signal.emit(f"  [{cafe_url}] 등급 조회 에러: {str(e)[:40]}")
+                    return cafe_url, None
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(cafe_worker_map)) as pool:
+                    futures = [
+                        pool.submit(grade_task, url, w_idx, w_drv)
+                        for url, (w_idx, w_drv) in cafe_worker_map.items()
+                    ]
+                    for f in concurrent.futures.as_completed(futures):
+                        url, info = f.result()
+                        if info:
+                            cafe_grades[url] = info
+                            self.log_signal.emit(f"  등급 조회 성공: {url} → {list(info['grades'].values())}")
 
             # ── 3단계: 카페 접속 병렬 실행 ──
             self.log_signal.emit(f"=== 3단계: 카페 접속 (병렬 {len(logged_in)}개) ===")

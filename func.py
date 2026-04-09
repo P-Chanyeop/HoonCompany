@@ -16,6 +16,9 @@ from datetime import datetime
 from typing import Optional, Callable
 
 import undetected_chromedriver as uc
+# from selenium import webdriver
+# from selenium.webdriver.chrome.options import Options
+# from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.alert import Alert
@@ -174,6 +177,8 @@ def create_driver(proxy_str=None, worker_id=0, chrome_version=145):
     opts = uc.ChromeOptions()
     if proxy_str:
         opts.add_argument(f"--proxy-server={proxy_str}")
+    opts.add_argument("--disable-backgrounding-occluded-windows")
+    opts.add_argument("--disable-renderer-backgrounding")
     user_data = os.path.join(tempfile.gettempdir(), f"uc_worker_{worker_id}")
 
     # 생성 시도, 실패하면 정리 후 재시도
@@ -201,6 +206,40 @@ def create_driver(proxy_str=None, worker_id=0, chrome_version=145):
                 time.sleep(1)
             else:
                 raise
+
+
+# def create_driver(proxy_str=None, worker_id=0):
+#     import tempfile
+#     opts = Options()
+#     if proxy_str:
+#         opts.add_argument(f"--proxy-server={proxy_str}")
+#     user_data = os.path.join(tempfile.gettempdir(), f"uc_worker_{worker_id}")
+#     opts.add_argument(f"--user-data-dir={user_data}")
+#
+#     for attempt in range(2):
+#         try:
+#             driver = webdriver.Chrome(options=opts)
+#             driver.set_window_size(1920, 1080)
+#             driver.set_page_load_timeout(20)
+#             driver.implicitly_wait(5)
+#             return driver
+#         except Exception as e:
+#             if attempt == 0:
+#                 logger.warning(f"드라이버 생성 실패 (워커#{worker_id}), 정리 후 재시도: {str(e)[:40]}")
+#                 import subprocess, shutil
+#                 try:
+#                     subprocess.run(["taskkill", "/F", "/IM", "chrome.exe", "/T"],
+#                                    capture_output=True, timeout=5)
+#                 except:
+#                     pass
+#                 time.sleep(1)
+#                 try:
+#                     shutil.rmtree(user_data, ignore_errors=True)
+#                 except:
+#                     pass
+#                 time.sleep(1)
+#             else:
+#                 raise
 
 
 # ═══════════════════════════════════════════════
@@ -586,76 +625,65 @@ def _solve_text_captcha(driver, _log):
 # ═══════════════════════════════════════════════
 
 def get_cafe_grades(driver, cafe_url, log_fn=None):
-    """카페 등급 조회 — 카페 접속 → 나의활동 → 등급 안내 팝업."""
+    """카페 등급 조회 — 카페 접속 → clubid 추출 → API로 등급 조회."""
     _log = log_fn or (lambda msg: logger.info(msg))
+    empty = {"my_grade": -1, "my_grade_text": "", "grades": {}}
     try:
         driver.get(cafe_url)
         time.sleep(3)
         dismiss_alert(driver)
 
-        # 나의활동 JS 호출
+        # clubid 추출
+        club_id = None
         try:
-            driver.execute_script("showMyAction();")
-            time.sleep(3)
-            _log("나의활동 호출 성공")
+            link = driver.find_element(By.CSS_SELECTOR, 'a[name="myCafeUrlLink"]')
+            m = re.search(r'clubid=(\d+)', link.get_attribute("href") or "")
+            if m: club_id = m.group(1)
         except:
-            _log("나의활동 실패")
-            return {"my_grade": -1, "my_grade_text": "", "grades": {}}
+            pass
+        if not club_id:
+            m = re.search(r'clubid["\s:=]+(\d+)', driver.page_source[:10000])
+            if m: club_id = m.group(1)
+        if not club_id:
+            _log("clubid 추출 실패")
+            return empty
+        _log(f"clubid={club_id}")
 
-        # 등급 안내 JS 호출
-        original_handles = set(driver.window_handles)
-        try:
-            driver.execute_script("viewMyMemberLevel();")
-            time.sleep(3)
-            _log("등급 안내 호출 성공")
-        except:
-            _log("등급 안내 실패")
-            return {"my_grade": -1, "my_grade_text": "", "grades": {}}
+        # API 호출 (브라우저 XHR)
+        import json
+        api_url = f"https://apis.naver.com/cafe-web/cafe-mobile/CafeMemberLevelInfo?cafeId={club_id}"
+        resp_text = driver.execute_script(
+            "var x=new XMLHttpRequest();x.open('GET',arguments[0],false);x.send();return x.responseText;",
+            api_url
+        )
+        data = json.loads(resp_text)
+        result = data.get("message", {}).get("result", {})
+        level_list = result.get("memberLevelList", [])
+        if not level_list:
+            _log("등급 목록 비어있음")
+            return empty
 
-        # 새 창 또는 현재 페이지에서 등급 파싱
-        grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}}
+        grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}, "is_member": result.get("isCafeMember", False)}
+        for lv in level_list:
+            level, name = lv["memberlevel"], lv["memberlevelname"]
+            conds = []
+            if lv.get("visitcount"): conds.append(f"방문{lv['visitcount']}")
+            if lv.get("articlecount"): conds.append(f"글{lv['articlecount']}")
+            if lv.get("commentcount"): conds.append(f"댓글{lv['commentcount']}")
+            if lv.get("likecount"): conds.append(f"좋아요{lv['likecount']}")
+            cond_str = ", ".join(conds) if conds else "자동/수동"
+            grade_info["grades"][level] = f"{name} ({cond_str})"
+            _log(f"등급 {level}: {name} — {cond_str}")
+            if lv.get("existmember") == "Y":
+                grade_info["my_grade"] = level
+                grade_info["my_grade_text"] = name
 
-        # 먼저 새 창 확인
-        new_handle = None
-        new_handles = set(driver.window_handles) - original_handles
-        if new_handles:
-            new_handle = new_handles.pop()
-            driver.switch_to.window(new_handle)
-            time.sleep(2)
-            _log("등급 팝업 새 창 전환")
-
-        # 등급 파싱 (최대 5초 대기)
-        for _ in range(10):
-            grade_rows = driver.find_elements(By.CSS_SELECTOR, "strong.level_icon_area")
-            if grade_rows:
-                break
-            time.sleep(0.5)
-
-        if grade_rows:
-            for idx, row in enumerate(grade_rows):
-                txt = row.text.strip()
-                if txt:
-                    grade_info["grades"][idx] = txt
-                    _log(f"등급 {idx}: {txt}")
-        else:
-            _log("등급 행 못 찾음")
-
-        # 팝업 닫고 원래 창 복귀
-        if new_handle:
-            try:
-                driver.close()
-            except:
-                pass
-            original_handle = [h for h in driver.window_handles if h != new_handle]
-            if original_handle:
-                driver.switch_to.window(original_handle[0])
-
-        _log(f"등급 조회 완료: {len(grade_info['grades'])}개 등급")
+        _log(f"등급 조회 완료: {len(grade_info['grades'])}개, 가입={grade_info['is_member']}, 내등급={grade_info['my_grade_text'] or '없음'}")
         return grade_info
 
     except Exception as e:
         _log(f"등급 조회 실패: {str(e)[:60]}")
-        return {"my_grade": -1, "my_grade_text": "", "grades": {}}
+        return empty
 
 
 def visit_cafe(driver, account, log_fn=None):
