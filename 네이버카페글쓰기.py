@@ -533,22 +533,23 @@ class LoginWorkerThread(QThread):
                         acc_for_task = {**grp, **task}
                         cafe_result = func.visit_cafe(drv, acc_for_task, log_fn)
 
-                        if cafe_result.get("ok") or (cafe_result.get("need_join") and self.settings.get("auto_join")):
+                        if cafe_result.get("ok"):
                             # 등급 조회 (캐시 — 같은 카페면 1번만)
-                            if cafe_result.get("ok"):
-                                with cafe_grades_lock:
-                                    if cafe_url not in cafe_grades:
-                                        self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 등급 조회: {cafe_short}")
-                                        grade_info = func.get_cafe_grades(drv, cafe_url, log_fn)
-                                        cafe_grades[cafe_url] = grade_info
+                            with cafe_grades_lock:
+                                if cafe_url not in cafe_grades:
+                                    self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 등급 조회: {cafe_short}")
+                                    grade_info = func.get_cafe_grades(drv, cafe_url, log_fn)
+                                    cafe_grades[cafe_url] = grade_info
 
                             self.worker_update.emit(worker_idx, f"작업 중: {cafe_short}")
+                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 작업 시작")
                             work_result = func.do_cafe_work(drv, acc_for_task, cafe_grades, self.settings, log_fn)
                             self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {work_result['msg']}")
 
                             # 결과시트 기록 (작성된 글 1개당 1행)
                             rows = work_result.get("result_rows", [])
                             if rows:
+                                self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 결과시트 기록: {len(rows)}행")
                                 sheet_rows = []
                                 for r in rows:
                                     sheet_rows.append([
@@ -561,13 +562,19 @@ class LoginWorkerThread(QThread):
                                         "N" if not r.get("deleted") else "Y",
                                     ])
                                 func.append_to_gsheet(sheet_rows, sheet_name="결과", log_fn=log_fn)
+                            else:
+                                self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 작성된 글 없음")
+                        elif cafe_result.get("need_join"):
+                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 미가입 (자동가입 비활성화)")
+                            self.worker_update.emit(worker_idx, f"미가입: {cafe_short}")
                         else:
                             self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {cafe_result['msg']}")
-                            self.worker_update.emit(worker_idx, f"미가입: {cafe_short}")
+                            self.worker_update.emit(worker_idx, f"실패: {cafe_short}")
                     except Exception as ce:
                         self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short} 에러: {str(ce)[:60]}")
 
                 self.worker_update.emit(worker_idx, f"완료 ({len(tasks)}개 카페)")
+                self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 전체 작업 완료")
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(logged_in)) as pool:
                 futures = [pool.submit(cafe_task, i, grp, drv) for i, grp, drv in logged_in]

@@ -1300,36 +1300,42 @@ def get_article_list(driver, cafe_url, menu_id, page=1, log_fn=None):
     articles = []
     try:
         # 게시판 페이지 접속
-        board_url = f"{cafe_url}/ArticleList.nhn?search.clubid=&search.menuid={menu_id}&search.page={page}"
-        driver.get(f"{cafe_url}?iframe_url=/ArticleList.nhn%3Fsearch.menuid%3D{menu_id}%26search.page%3D{page}")
+        target_url = f"{cafe_url}?iframe_url=/ArticleList.nhn%3Fsearch.menuid%3D{menu_id}%26search.page%3D{page}"
+        _log(f"게시판 접속: 메뉴ID={menu_id}, 페이지={page}")
+        driver.get(target_url)
         time.sleep(3)
 
         # iframe 전환
         try:
             iframe = driver.find_element(By.CSS_SELECTOR, "iframe#cafe_main")
             driver.switch_to.frame(iframe)
+            _log("iframe 전환 완료")
             time.sleep(1)
         except:
-            pass
+            _log("iframe 없음 — 메인 프레임에서 파싱")
 
         # 게시글 행 파싱
         rows = driver.find_elements(By.CSS_SELECTOR, ".article-board .board-list .inner_list, tr.board-list-item")
+        _log(f"게시글 행 {len(rows)}개 발견")
+
+        if not rows:
+            _log(f"페이지 {page}: 게시글 없음 — 스크래핑 종료")
+            driver.switch_to.default_content()
+            return []
+
         for row in rows:
             try:
-                # 제목 + 링크
                 title_el = row.find_elements(By.CSS_SELECTOR, "a.article")
                 if not title_el:
                     continue
                 title = title_el[0].text.strip()
                 href = title_el[0].get_attribute("href") or ""
 
-                # 글번호 추출
                 article_id = ""
                 match = re.search(r'articleid=(\d+)', href)
                 if match:
                     article_id = match.group(1)
 
-                # 작성자 등급
                 grade_el = row.find_elements(By.CSS_SELECTOR, "img.mem_level, .member_level, .level_icon")
                 grade_alt = ""
                 if grade_el:
@@ -1345,7 +1351,7 @@ def get_article_list(driver, cafe_url, menu_id, page=1, log_fn=None):
                 continue
 
         driver.switch_to.default_content()
-        _log(f"게시글 {len(articles)}개 수집 (페이지 {page})")
+        _log(f"게시글 {len(articles)}개 수집 완료 (페이지 {page})")
         return articles
 
     except Exception as e:
@@ -1367,6 +1373,7 @@ def write_reply(driver, cafe_url, article_id, content, image_paths=None, log_fn=
     try:
         # 게시글 접속
         article_url = f"{cafe_url}?iframe_url=/ArticleRead.nhn%3Farticleid%3D{article_id}"
+        _log(f"게시글 접속: article_id={article_id}")
         driver.get(article_url)
         time.sleep(3)
 
@@ -1374,36 +1381,46 @@ def write_reply(driver, cafe_url, article_id, content, image_paths=None, log_fn=
         try:
             iframe = driver.find_element(By.CSS_SELECTOR, "iframe#cafe_main")
             driver.switch_to.frame(iframe)
+            _log("iframe 전환 완료")
             time.sleep(1)
         except:
-            pass
+            _log("iframe 없음 — 메인 프레임에서 진행")
 
         # 댓글 입력 영역 찾기
+        _log("댓글 입력 영역 탐색 중...")
         comment_input = driver.find_elements(By.CSS_SELECTOR, ".comment_inbox .comment_input, textarea.comment_input")
         if not comment_input:
             comment_area = driver.find_elements(By.CSS_SELECTOR, ".comment_box, .CommentWriter")
             if comment_area:
+                _log("댓글 영역 클릭하여 활성화")
                 comment_area[0].click()
                 time.sleep(1)
                 comment_input = driver.find_elements(By.CSS_SELECTOR, ".comment_inbox .comment_input, textarea.comment_input")
 
         if not comment_input:
-            _log("댓글 입력 영역 못 찾음")
+            _log("❌ 댓글 입력 영역 못 찾음")
             driver.switch_to.default_content()
             return {"ok": False, "url": ""}
 
+        _log("댓글 입력 영역 발견")
+
         # 이미지 첨부 (있으면)
         if image_paths:
+            _log(f"이미지 {len(image_paths)}개 첨부 시도")
             file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
             if file_inputs:
-                for img_path in image_paths:
+                for idx, img_path in enumerate(image_paths):
                     try:
                         file_inputs[0].send_keys(os.path.abspath(img_path))
+                        _log(f"이미지 첨부 {idx+1}/{len(image_paths)}: {os.path.basename(img_path)}")
                         time.sleep(1)
                     except Exception as e:
                         _log(f"이미지 첨부 실패: {str(e)[:40]}")
+            else:
+                _log("파일 input 못 찾음 — 이미지 첨부 스킵")
 
         # 댓글 입력
+        _log(f"댓글 텍스트 입력: {content[:30]}...")
         comment_input[0].click()
         time.sleep(0.3)
         pyperclip.copy(content)
@@ -1414,21 +1431,21 @@ def write_reply(driver, cafe_url, article_id, content, image_paths=None, log_fn=
         # 등록 버튼 클릭
         submit_btn = driver.find_elements(By.CSS_SELECTOR, ".btn_register, button.btn_submit, a.btn_register")
         if submit_btn:
+            _log("등록 버튼 클릭")
             submit_btn[0].click()
             time.sleep(2)
 
-            # 작성된 답글 URL 추출
             reply_url = driver.current_url
-            _log(f"답글 작성 완료: {content[:20]}...")
+            _log(f"답글 등록 완료 — URL: {reply_url[:60]}")
             driver.switch_to.default_content()
             return {"ok": True, "url": reply_url}
         else:
-            _log("등록 버튼 못 찾음")
+            _log("❌ 등록 버튼 못 찾음")
             driver.switch_to.default_content()
             return {"ok": False, "url": ""}
 
     except Exception as e:
-        _log(f"답글 작성 실패: {str(e)[:60]}")
+        _log(f"❌ 답글 작성 예외: {str(e)[:60]}")
         try:
             driver.switch_to.default_content()
         except:
@@ -1464,11 +1481,13 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
         # 에디터 페이지 접속
         cafe_id = cafe_url.rstrip("/").split("/")[-1]
         editor_url = f"https://cafe.naver.com/ca-fe/cafes/{cafe_id}/menus/{menu_id}/articles/write"
+        _log(f"에디터 접속: {editor_url}")
         driver.get(editor_url)
         time.sleep(3)
         dismiss_alert(driver)
 
         # 제목 입력
+        _log("제목 입력 영역 탐색...")
         title_input = driver.find_elements(By.CSS_SELECTOR, "textarea.textarea_input, input.se-title-input, textarea[placeholder*='제목']")
         if not title_input:
             title_input = driver.find_elements(By.CSS_SELECTOR, "[class*='title'] textarea, [class*='title'] input")
@@ -1479,21 +1498,27 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
             title_input[0].send_keys(Keys.CONTROL, "a")
             title_input[0].send_keys(Keys.CONTROL, "v")
             time.sleep(0.3)
-            _log(f"제목 입력: {title[:30]}")
+            _log(f"제목 입력 완료: {title[:30]}")
         else:
-            _log("제목 입력 영역 못 찾음")
+            _log("❌ 제목 입력 영역 못 찾음")
             return {"ok": False, "url": "", "msg": "제목 입력 실패"}
 
         # 본문 영역 클릭
+        _log("본문 영역 탐색...")
         body_area = driver.find_elements(By.CSS_SELECTOR, ".se-component-content .se-text-paragraph, div.se-content, div[contenteditable='true']")
         if not body_area:
             body_area = driver.find_elements(By.CSS_SELECTOR, "[class*='editor'] [contenteditable], .article_editor")
         if body_area:
             body_area[0].click()
             time.sleep(0.3)
+            _log("본문 영역 활성화")
+        else:
+            _log("⚠ 본문 영역 못 찾음 — 계속 진행")
 
         # 본문 파트 순서대로 입력
-        for part in processed_parts:
+        text_count = 0
+        img_count = 0
+        for part_idx, part in enumerate(processed_parts):
             if isinstance(part, str):
                 if not part.strip():
                     continue
@@ -1503,42 +1528,56 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
                 time.sleep(0.3)
                 body_el.send_keys(Keys.ENTER)
                 time.sleep(0.2)
+                text_count += 1
+                _log(f"본문 텍스트 {text_count} 입력 ({len(part)}자)")
             elif isinstance(part, dict) and part.get("type") == "photo":
                 img_path = part.get("path", "")
                 if not img_path or not os.path.isfile(img_path):
+                    _log(f"⚠ 이미지 파일 없음: {img_path}")
                     continue
-                # 이미지 업로드: file input 찾기
                 file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
                 if file_inputs:
                     file_inputs[0].send_keys(os.path.abspath(img_path))
                     time.sleep(2)
-                    _log(f"이미지 업로드: {os.path.basename(img_path)}")
+                    img_count += 1
+                    _log(f"이미지 업로드 {img_count}: {os.path.basename(img_path)}")
                 else:
-                    _log("이미지 업로드 input 못 찾음")
+                    _log("❌ 이미지 업로드 input 못 찾음")
+
+        _log(f"본문 입력 완료: 텍스트 {text_count}개, 이미지 {img_count}개")
 
         # 옵션 설정 (댓글허용, 검색허용, 전체공개)
+        _log(f"옵션 설정: 댓글={options.get('allow_comment', True)}, 검색={options.get('allow_search', True)}, 공개={options.get('public', True)}")
         _set_post_options(driver, options, _log)
 
         # 등록 버튼
+        _log("등록 버튼 탐색...")
         time.sleep(1)
         submit_btns = driver.find_elements(By.CSS_SELECTOR, "button.btn_submit, button[class*='register'], a.btn_register, button.BaseButton")
+        clicked = False
         for btn in submit_btns:
             try:
                 txt = btn.text.strip()
                 if "등록" in txt or "작성" in txt:
+                    _log(f"등록 버튼 클릭: [{txt}]")
                     btn.click()
                     time.sleep(3)
+                    clicked = True
                     break
             except:
                 continue
 
+        if not clicked:
+            _log("❌ 등록 버튼 못 찾음")
+            return {"ok": False, "url": "", "msg": "등록 버튼 없음"}
+
         dismiss_alert(driver)
         post_url = driver.current_url
-        _log(f"글쓰기 완료: {post_url[:60]}")
+        _log(f"글쓰기 등록 완료 — URL: {post_url[:60]}")
         return {"ok": True, "url": post_url, "msg": "글쓰기 성공"}
 
     except Exception as e:
-        _log(f"글쓰기 실패: {str(e)[:60]}")
+        _log(f"❌ 글쓰기 예외: {str(e)[:60]}")
         return {"ok": False, "url": "", "msg": str(e)[:60]}
 
 
@@ -1626,23 +1665,23 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
     delete_images = settings.get("delete_images", False)
     post_options = settings.get("post_options", {})
 
-    # ── 메뉴ID 비어있으면 → 자동가입 트리거 ──
-    if not menu_id and settings.get("auto_join"):
-        _log("메뉴ID 없음 → 카페 가입 여부 확인")
-        visit_result = visit_cafe(driver, account, _log)
-        if visit_result.get("need_join"):
-            _log("미가입 → 자동가입 시도")
-            try:
-                from cafe_join import join_cafe
-                join_result = join_cafe(driver, cafe_url, log_fn=_log)
-                if join_result.get("ok"):
-                    _log(f"자동가입 성공: {join_result['msg']}")
-                else:
-                    _log(f"자동가입 실패: {join_result['msg']}")
-                    return {"ok": False, "msg": f"자동가입 실패: {join_result['msg']}", "written": 0, "result_rows": []}
-            except Exception as e:
-                _log(f"자동가입 에러: {str(e)[:60]}")
-                return {"ok": False, "msg": f"자동가입 에러: {str(e)[:40]}", "written": 0, "result_rows": []}
+    # ── 메뉴ID 비어있으면 → 자동가입 트리거 (비활성화 — 추후 활성화) ──
+    # if not menu_id and settings.get("auto_join"):
+    #     _log("메뉴ID 없음 → 카페 가입 여부 확인")
+    #     visit_result = visit_cafe(driver, account, _log)
+    #     if visit_result.get("need_join"):
+    #         _log("미가입 → 자동가입 시도")
+    #         try:
+    #             from cafe_join import join_cafe
+    #             join_result = join_cafe(driver, cafe_url, log_fn=_log)
+    #             if join_result.get("ok"):
+    #                 _log(f"자동가입 성공: {join_result['msg']}")
+    #             else:
+    #                 _log(f"자동가입 실패: {join_result['msg']}")
+    #                 return {"ok": False, "msg": f"자동가입 실패: {join_result['msg']}", "written": 0, "result_rows": []}
+    #         except Exception as e:
+    #             _log(f"자동가입 에러: {str(e)[:60]}")
+    #             return {"ok": False, "msg": f"자동가입 에러: {str(e)[:40]}", "written": 0, "result_rows": []}
 
     # ── 메뉴ID 없으면 글쓰기 가능 게시판 자동 탐색 ──
     if not menu_id:
@@ -1651,6 +1690,8 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
         if not menu_id:
             _log("글쓰기 가능한 게시판 못 찾음")
             return {"ok": False, "msg": "글쓰기 가능 게시판 없음", "written": 0, "result_rows": []}
+
+    _log(f"[설정] 모드={write_mode} / 게시판={menu_id} / 목표={post_count}개 / 페이지={page_lo}~{page_hi} / 딜레이={delay_lo}~{delay_hi}초 / 이미지삭제={delete_images}")
 
     written = 0
     result_rows = []
@@ -1680,47 +1721,58 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
 
     # ── 글쓰기 모드 ──
     if write_mode in ("글쓰기", "글쓰기 + 답글"):
+        _log(f"[글쓰기 모드] 목표: {post_count}개 / 게시판: {menu_id}")
         for i in range(post_count):
             if written >= post_count:
+                _log(f"목표 달성 ({written}/{post_count}) — 글쓰기 종료")
                 break
 
             ms = random.choice(manuscripts) if manuscripts else None
             if not ms:
+                _log("원고 없음 — 글쓰기 중단")
                 break
 
-            _log(f"글쓰기 {i+1}/{post_count}: [{ms['name']}]")
+            _log(f"글쓰기 {i+1}/{post_count}: 원고=[{ms['name']}] 제목=[{ms.get('title', '')[:30]}]")
+            _log(f"이미지 처리 시작 (파트 {len(ms.get('body_parts', []))}개)")
             processed = prepare_images_for_upload(ms.get("body_parts", []), delete_after=delete_images, log_fn=_log)
+            _log(f"이미지 처리 완료 → 에디터 작성 시작")
             result = write_post(driver, cafe_url, menu_id, ms.get("title", ""), processed, post_options, _log)
 
             if result.get("ok"):
                 written += 1
                 result_rows.append({**row_base, "url": result["url"], "deleted": False})
-                _log(f"글쓰기 {written}/{post_count} 완료: {result['url'][:50]}")
-                # 임시 이미지 정리
+                _log(f"✅ 글쓰기 {written}/{post_count} 완료 — URL: {result['url'][:60]}")
                 _cleanup_temp_images(processed)
                 delay = random.randint(delay_lo, delay_hi)
-                _log(f"딜레이 {delay}초...")
+                _log(f"딜레이 {delay}초 대기...")
                 time.sleep(delay)
             else:
                 _cleanup_temp_images(processed)
-                _log(f"글쓰기 실패: {result.get('msg', '')}")
+                _log(f"❌ 글쓰기 실패: {result.get('msg', '')}")
 
         if write_mode == "글쓰기":
-            _log(f"카페 작업 완료: {written}/{post_count}개 작성")
+            _log(f"=== 카페 작업 완료: {written}/{post_count}개 작성 ===")
             return {"ok": written > 0, "msg": f"{written}/{post_count}개 작성", "written": written, "result_rows": result_rows}
 
     # ── 답글 모드 ──
     if write_mode in ("답글", "글쓰기 + 답글"):
         reply_target = post_count - written if write_mode == "글쓰기 + 답글" else post_count
         reply_written = 0
+        _log(f"[답글 모드] 목표: {reply_target}개 / 페이지 범위: {page_lo}~{page_hi}")
 
         for page in range(page_lo, page_hi + 1):
             if reply_written >= reply_target:
+                _log(f"목표 달성 ({reply_written}/{reply_target}) — 페이지 순회 종료")
                 break
 
-            _log(f"페이지 {page} 게시글 수집 중...")
+            _log(f"페이지 {page}/{page_hi} 게시글 수집 중...")
             articles = get_article_list(driver, cafe_url, menu_id, page, _log)
 
+            if not articles:
+                _log(f"페이지 {page}: 게시글 없음 — 다음 페이지 없으므로 종료")
+                break
+
+            filtered_count = 0
             for article in articles:
                 if reply_written >= reply_target:
                     break
@@ -1737,12 +1789,14 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
                             break
 
                 if grade_filter and author_idx not in grade_filter:
+                    filtered_count += 1
                     continue
 
                 # 원고 랜덤 추출
                 if manuscripts:
                     ms = random.choice(manuscripts)
                     content_text = _flatten_body(ms.get("body_parts", []))
+                    _log(f"원고 선택: [{ms['name']}] (랜덤)")
                     # 답글에 이미지 첨부할 경우
                     img_paths = []
                     for part in ms.get("body_parts", []):
@@ -1750,18 +1804,19 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
                             for f in part.get("files", []):
                                 rnd = randomize_image(f)
                                 img_paths.append(rnd)
+                                _log(f"이미지 랜덤화: {os.path.basename(f)} → {os.path.basename(rnd)}")
                 else:
                     content_text = random.choice(contents)
                     img_paths = []
 
-                _log(f"답글 작성: [{article['title'][:20]}] article_id={article['article_id']}")
+                _log(f"답글 작성 시도: [{article['title'][:30]}] article_id={article['article_id']} 등급={author_grade_text or '없음(탈퇴)'}")
                 result = write_reply(driver, cafe_url, article["article_id"], content_text, img_paths or None, _log)
 
                 if result.get("ok"):
                     reply_written += 1
                     written += 1
                     result_rows.append({**row_base, "url": result["url"], "deleted": False})
-                    _log(f"답글 {reply_written}/{reply_target} 완료")
+                    _log(f"✅ 답글 {reply_written}/{reply_target} 완료 — URL: {result['url'][:60]}")
 
                     # 임시 이미지 정리
                     for p in img_paths:
@@ -1775,14 +1830,26 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
                                 for f in part.get("files", []):
                                     try:
                                         os.remove(f)
+                                        _log(f"원본 삭제: {os.path.basename(f)}")
                                     except:
                                         pass
 
                     delay = random.randint(delay_lo, delay_hi)
-                    _log(f"딜레이 {delay}초...")
+                    _log(f"딜레이 {delay}초 대기...")
                     time.sleep(delay)
+                else:
+                    _log(f"❌ 답글 작성 실패: article_id={article['article_id']}")
+                    # 실패한 임시 이미지도 정리
+                    for p in img_paths:
+                        try:
+                            os.remove(p)
+                        except:
+                            pass
 
-    _log(f"카페 작업 완료: {written}/{post_count}개 작성")
+            if filtered_count > 0:
+                _log(f"페이지 {page}: 등급 필터로 {filtered_count}개 스킵")
+
+    _log(f"=== 카페 작업 완료: {written}/{post_count}개 작성 ===")
     return {"ok": written > 0, "msg": f"{written}/{post_count}개 작성", "written": written, "result_rows": result_rows}
 
 
