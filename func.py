@@ -348,6 +348,12 @@ def _handle_protection(driver, account, url, page, _log):
                 elif "휴대전화" in page2 or "휴대폰" in page2 or "+82" in page2:
                     return {"ok": False, "msg": "보호조치 - 핸드폰 인증 (해제 불가)", "error": "blocked_phone"}
                 else:
+                    try:
+                        with open(f"protection_debug_{nid}.html", "w", encoding="utf-8") as f:
+                            f.write(driver.page_source)
+                        _log(f"보호조치 해제 방식 불명 - protection_debug_{nid}.html 저장, URL: {url2[:60]}")
+                    except:
+                        pass
                     return {"ok": False, "msg": "보호조치 - 해제 방식 불명", "error": "blocked_unknown"}
         except:
             continue
