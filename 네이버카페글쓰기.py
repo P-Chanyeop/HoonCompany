@@ -586,8 +586,13 @@ class LoginWorkerThread(QThread):
                             self.worker_update.emit(worker_idx, f"답글 작성: {cafe_short}")
                             work_result = func.do_cafe_work(drv, acc_for_task, cafe_grades, self.settings, log_fn)
                             self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {work_result['msg']}")
+                        elif cafe_result.get("need_join") and self.settings.get("auto_join"):
+                            # 자동 가입 ON + 미가입 → 가입 시도 (TODO) + 게시판 탐색
+                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 미가입 - 자동가입 ON (가입 로직 미구현)")
+                            self.worker_update.emit(worker_idx, f"미가입: {cafe_short} (가입 미구현)")
                         else:
                             self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {cafe_result['msg']}")
+                            self.worker_update.emit(worker_idx, f"미가입: {cafe_short}")
                     except Exception as ce:
                         self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short} 에러: {str(ce)[:60]}")
 
@@ -917,6 +922,7 @@ class CafeWriterTab(QWidget):
             "delay_lo": self.delay_lo.value(),
             "delay_hi": self.delay_hi.value(),
             "grade_filter": [i for i, (n, cb) in enumerate(self.grade_checks.items()) if cb.isChecked()],
+            "auto_join": self.chk_auto_join.isChecked(),
             "contents": [],  # TODO: 원고 폴더에서 로드
         }
 
