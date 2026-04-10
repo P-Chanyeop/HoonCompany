@@ -533,20 +533,34 @@ class LoginWorkerThread(QThread):
                         acc_for_task = {**grp, **task}
                         cafe_result = func.visit_cafe(drv, acc_for_task, log_fn)
 
-                        if cafe_result.get("ok"):
+                        if cafe_result.get("ok") or (cafe_result.get("need_join") and self.settings.get("auto_join")):
                             # 등급 조회 (캐시 — 같은 카페면 1번만)
-                            with cafe_grades_lock:
-                                if cafe_url not in cafe_grades:
-                                    self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 등급 조회: {cafe_short}")
-                                    grade_info = func.get_cafe_grades(drv, cafe_url, log_fn)
-                                    cafe_grades[cafe_url] = grade_info
+                            if cafe_result.get("ok"):
+                                with cafe_grades_lock:
+                                    if cafe_url not in cafe_grades:
+                                        self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 등급 조회: {cafe_short}")
+                                        grade_info = func.get_cafe_grades(drv, cafe_url, log_fn)
+                                        cafe_grades[cafe_url] = grade_info
 
-                            self.worker_update.emit(worker_idx, f"답글 작성: {cafe_short}")
+                            self.worker_update.emit(worker_idx, f"작업 중: {cafe_short}")
                             work_result = func.do_cafe_work(drv, acc_for_task, cafe_grades, self.settings, log_fn)
                             self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {work_result['msg']}")
-                        elif cafe_result.get("need_join") and self.settings.get("auto_join"):
-                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 미가입 - 자동가입 ON (가입 로직 미구현)")
-                            self.worker_update.emit(worker_idx, f"미가입: {cafe_short} (가입 미구현)")
+
+                            # 결과시트 기록 (작성된 글 1개당 1행)
+                            rows = work_result.get("result_rows", [])
+                            if rows:
+                                sheet_rows = []
+                                for r in rows:
+                                    sheet_rows.append([
+                                        r.get("id", ""),
+                                        r.get("pw", ""),
+                                        r.get("name", ""),
+                                        r.get("birth", ""),
+                                        r.get("gender", ""),
+                                        r.get("url", ""),
+                                        "N" if not r.get("deleted") else "Y",
+                                    ])
+                                func.append_to_gsheet(sheet_rows, sheet_name="결과", log_fn=log_fn)
                         else:
                             self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {cafe_result['msg']}")
                             self.worker_update.emit(worker_idx, f"미가입: {cafe_short}")
@@ -681,7 +695,19 @@ class CafeWriterTab(QWidget):
 
         self.chk_allow_comment = QCheckBox("댓글허용")
         self.chk_allow_comment.setChecked(True)
-        wg.addWidget(self.chk_allow_comment, 3, 0, 1, 3)
+        wg.addWidget(self.chk_allow_comment, 3, 0)
+
+        self.chk_allow_search = QCheckBox("검색허용")
+        self.chk_allow_search.setChecked(True)
+        wg.addWidget(self.chk_allow_search, 3, 1)
+
+        self.chk_public = QCheckBox("전체공개")
+        self.chk_public.setChecked(True)
+        wg.addWidget(self.chk_public, 3, 2)
+
+        self.chk_delete_images = QCheckBox("작성 후 원본 사진 삭제")
+        self.chk_delete_images.setChecked(False)
+        wg.addWidget(self.chk_delete_images, 4, 0, 1, 3)
 
         left_layout.addWidget(write_group)
 
@@ -911,12 +937,19 @@ class CafeWriterTab(QWidget):
 
         # 설정 수집
         settings = {
+            "write_mode": self.write_mode.currentText(),
             "page_lo": self.page_lo.value(),
             "page_hi": self.page_hi.value(),
             "delay_lo": self.delay_lo.value(),
             "delay_hi": self.delay_hi.value(),
-            "grade_filter": [i for i, (n, cb) in enumerate(self.grade_checks.items()) if cb.isChecked()],
+            "grade_filter": [i - 1 for i, (n, cb) in enumerate(self.grade_checks.items()) if cb.isChecked()],
             "auto_join": self.chk_auto_join.isChecked(),
+            "delete_images": self.chk_delete_images.isChecked(),
+            "post_options": {
+                "allow_comment": self.chk_allow_comment.isChecked(),
+                "allow_search": self.chk_allow_search.isChecked(),
+                "public": self.chk_public.isChecked(),
+            },
             "manuscripts": manuscripts,
             "contents": [],
         }
