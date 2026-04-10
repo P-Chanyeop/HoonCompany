@@ -542,3 +542,38 @@ def _extract_error_message(driver):
     except:
         pass
     return None
+
+
+# ═══════════════════════════════════════════════
+# 가입 결과 구글시트 기록
+# ═══════════════════════════════════════════════
+
+def save_results_to_gsheet(results, sheet_name="가입결과", log_fn=None):
+    """
+    가입 결과를 구글시트에 기록한다.
+
+    Args:
+        results: batch_join_cafes 반환값 또는 동일 형식의 dict 리스트
+            [{"worker_idx", "account_id", "cafe_url", "ok", "msg", "error"}, ...]
+        sheet_name: 기록할 시트(탭) 이름 (기본: "가입결과")
+        log_fn: 로그 콜백
+
+    Returns:
+        bool: 기록 성공 여부
+    """
+    from datetime import datetime
+    _log = log_fn or (lambda msg: logger.info(msg))
+
+    rows = []
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for r in results:
+        rows.append([
+            ts,
+            r.get("account_id", ""),
+            r.get("cafe_url", ""),
+            "성공" if r.get("ok") else "실패",
+            r.get("msg", ""),
+            r.get("error", "") or "",
+        ])
+
+    return func.append_to_gsheet(rows, sheet_name=sheet_name, log_fn=_log)

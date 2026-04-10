@@ -84,6 +84,59 @@ def load_accounts_from_gsheet():
 
 
 # ═══════════════════════════════════════════════
+# 구글시트 쓰기
+# ═══════════════════════════════════════════════
+
+def _get_sheets_service_write():
+    """쓰기 가능한 구글시트 서비스 반환. 서비스 계정 JSON 필요."""
+    cfg = load_config()
+    sa_path = cfg.get("google_sheets", "service_account", fallback="").strip()
+    if sa_path and os.path.isfile(sa_path):
+        from google.oauth2.service_account import Credentials
+        from googleapiclient.discovery import build
+        creds = Credentials.from_service_account_file(sa_path, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        return build('sheets', 'v4', credentials=creds)
+    return None
+
+
+def append_to_gsheet(rows, sheet_name="결과", log_fn=None):
+    """
+    구글시트에 행 추가 (append).
+
+    Args:
+        rows: [[col1, col2, ...], ...] 추가할 행 목록
+        sheet_name: 시트(탭) 이름 (기본: "결과")
+        log_fn: 로그 콜백
+
+    Returns:
+        bool: 성공 여부
+    """
+    _log = log_fn or (lambda msg: logger.info(msg))
+    cfg = load_config()
+    gs_id = cfg.get("google_sheets", "sheet_id", fallback="")
+    if not gs_id:
+        _log("구글시트 ID 없음")
+        return False
+    try:
+        service = _get_sheets_service_write()
+        if not service:
+            _log("구글시트 쓰기 불가 — config.ini [google_sheets] service_account 경로 설정 필요")
+            return False
+        service.spreadsheets().values().append(
+            spreadsheetId=gs_id,
+            range=f"{sheet_name}!A1",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": rows}
+        ).execute()
+        _log(f"구글시트 기록 완료: {len(rows)}행 → [{sheet_name}]")
+        return True
+    except Exception as e:
+        _log(f"구글시트 기록 실패: {str(e)[:60]}")
+        return False
+
+
+# ═══════════════════════════════════════════════
 # 프록시 로드
 # ═══════════════════════════════════════════════
 
