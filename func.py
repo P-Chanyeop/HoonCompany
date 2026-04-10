@@ -663,8 +663,8 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
             _log("등급 목록 비어있음")
             return empty
 
-        grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}, "is_member": result.get("isCafeMember", False)}
-        for lv in level_list:
+        grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}, "grade_order": {}, "is_member": result.get("isCafeMember", False)}
+        for idx, lv in enumerate(level_list):
             level, name = lv["memberlevel"], lv["memberlevelname"]
             conds = []
             if lv.get("visitcount"): conds.append(f"방문{lv['visitcount']}")
@@ -673,9 +673,10 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
             if lv.get("likecount"): conds.append(f"좋아요{lv['likecount']}")
             cond_str = ", ".join(conds) if conds else "자동/수동"
             grade_info["grades"][level] = f"{name} ({cond_str})"
-            _log(f"등급 {level}: {name} — {cond_str}")
+            grade_info["grade_order"][idx] = {"level": level, "name": name, "cond": cond_str}
+            _log(f"등급 {idx}: {name} — {cond_str}")
             if lv.get("existmember") == "Y":
-                grade_info["my_grade"] = level
+                grade_info["my_grade"] = idx
                 grade_info["my_grade_text"] = name
 
         _log(f"등급 조회 완료: {len(grade_info['grades'])}개, 가입={grade_info['is_member']}, 내등급={grade_info['my_grade_text'] or '없음'}")
