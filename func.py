@@ -687,6 +687,36 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
         return empty
 
 
+def _close_cafe_popups(driver):
+    """카페 접속 시 뜨는 팝업(가입 환영 등) 닫기."""
+    try:
+        # 닫기/X 버튼 찾기
+        close_selectors = [
+            "button.btn_close", "a.btn_close", ".popup_close",
+            "button[class*='close']", "a[class*='close']",
+            "button[title='닫기']", "a[title='닫기']",
+        ]
+        for sel in close_selectors:
+            btns = driver.find_elements(By.CSS_SELECTOR, sel)
+            for btn in btns:
+                try:
+                    if btn.is_displayed():
+                        btn.click()
+                        time.sleep(0.5)
+                except:
+                    continue
+        # 텍스트가 "닫기"인 버튼
+        for btn in driver.find_elements(By.CSS_SELECTOR, "button, a"):
+            try:
+                if btn.text.strip() == "닫기" and btn.is_displayed():
+                    btn.click()
+                    time.sleep(0.5)
+            except:
+                continue
+    except:
+        pass
+
+
 def visit_cafe(driver, account, log_fn=None):
     """
     로그인된 드라이버로 카페 접속.
@@ -704,6 +734,9 @@ def visit_cafe(driver, account, log_fn=None):
         driver.get(cafe_url)
         time.sleep(3)
         dismiss_alert(driver)
+
+        # 팝업 닫기 (가입 환영 등 카페별 팝업)
+        _close_cafe_popups(driver)
 
         url, page = get_page_safe(driver)
         _log(f"카페 현재 URL: {url}")
