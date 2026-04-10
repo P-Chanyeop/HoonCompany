@@ -5,3 +5,5 @@ __pycache__/
 *.tmp
 *_debug.html
 changed_passwords.txt
+credentials.json
+token.json
