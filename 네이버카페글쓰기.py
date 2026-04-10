@@ -428,11 +428,12 @@ class LoginWorkerThread(QThread):
     worker_update = pyqtSignal(int, str)  # idx, status
     finished_signal = pyqtSignal(list)  # results
 
-    def __init__(self, accounts, proxies, worker_count):
+    def __init__(self, accounts, proxies, worker_count, settings=None):
         super().__init__()
         self.accounts = accounts
         self.proxies = proxies
         self.worker_count = worker_count
+        self.settings = settings or {}
         self.drivers = []
         self.results = []
         self._stop_flag = False
@@ -562,11 +563,26 @@ class LoginWorkerThread(QThread):
                     cafe_result = func.visit_cafe(drv, acc, log_fn)
                     if cafe_result.get("ok"):
                         self.worker_update.emit(worker_idx, "카페 접속 완료")
+                        self.log_signal.emit(f"워커#{worker_idx+1} [{acc['id']}] 카페: {cafe_result['msg']}")
+
+                        # 답글 작성
+                        if acc.get("menu_id"):
+                            # OFF 모드: 지정 게시판
+                            self.worker_update.emit(worker_idx, "답글 작성 중...")
+                            work_result = func.do_cafe_work(drv, acc, cafe_grades, self.settings, log_fn)
+                            self.worker_update.emit(worker_idx, f"작업완료: {work_result['msg']}")
+                            self.log_signal.emit(f"워커#{worker_idx+1} [{acc['id']}] 작업: {work_result['msg']}")
+                        else:
+                            # ON 모드: 자동 탐색 (카페 가입은 별도)
+                            self.worker_update.emit(worker_idx, "게시판 탐색 + 답글 작성 중...")
+                            work_result = func.do_cafe_work(drv, acc, cafe_grades, self.settings, log_fn)
+                            self.worker_update.emit(worker_idx, f"작업완료: {work_result['msg']}")
+                            self.log_signal.emit(f"워커#{worker_idx+1} [{acc['id']}] 작업: {work_result['msg']}")
                     else:
                         self.worker_update.emit(worker_idx, f"카페: {cafe_result['msg'][:20]}")
-                    self.log_signal.emit(f"워커#{worker_idx+1} [{acc['id']}] 카페: {cafe_result['msg']}")
+                        self.log_signal.emit(f"워커#{worker_idx+1} [{acc['id']}] 카페: {cafe_result['msg']}")
                 except Exception as ce:
-                    self.worker_update.emit(worker_idx, "카페 접속 에러")
+                    self.worker_update.emit(worker_idx, "카페 작업 에러")
                     self.log_signal.emit(f"워커#{worker_idx+1} [{acc['id']}] 카페 에러: {str(ce)[:60]}")
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(logged_in)) as pool:
@@ -880,8 +896,18 @@ class CafeWriterTab(QWidget):
 
         self._log(f"작업 시작 — 계정 {len(accounts)}개 / 프록시 {len(proxies)}개 / 워커 {count}개")
 
+        # 설정 수집
+        settings = {
+            "page_lo": self.page_lo.value(),
+            "page_hi": self.page_hi.value(),
+            "delay_lo": self.delay_lo.value(),
+            "delay_hi": self.delay_hi.value(),
+            "grade_filter": [i for i, (n, cb) in enumerate(self.grade_checks.items()) if cb.isChecked()],
+            "contents": [],  # TODO: 원고 폴더에서 로드
+        }
+
         # 워커 스레드 시작
-        self._worker_thread = LoginWorkerThread(accounts, proxies, count)
+        self._worker_thread = LoginWorkerThread(accounts, proxies, count, settings)
         self._worker_thread.log_signal.connect(self._log)
         self._worker_thread.worker_update.connect(self._update_worker_table)
         self._worker_thread.finished_signal.connect(self._on_finished)

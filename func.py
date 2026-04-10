@@ -838,3 +838,256 @@ def visit_cafe(driver, account, log_fn=None):
 
     except Exception as e:
         return {"ok": False, "msg": f"카페 접속 에러: {str(e)[:60]}"}
+
+
+# ═══════════════════════════════════════════════
+# 게시글 목록 가져오기
+# ═══════════════════════════════════════════════
+
+def find_writable_board(driver, cafe_url, log_fn=None):
+    """카페에서 글쓰기 가능한 게시판 자동 탐색 (API). 메뉴ID 반환."""
+    _log = log_fn or (lambda msg: logger.info(msg))
+    try:
+        # clubid 가져오기
+        driver.get(cafe_url)
+        time.sleep(3)
+        dismiss_alert(driver)
+        _close_cafe_popups(driver)
+
+        page = driver.page_source
+        match = re.search(r'clubid["\s:=]+(\d+)', page)
+        if not match:
+            _log("clubid 못 찾음")
+            return ""
+        clubid = match.group(1)
+
+        # 메뉴 API 호출
+        api_url = f"https://apis.naver.com/cafe-web/cafe-cafemain-api/v1.0/cafes/{clubid}/menus"
+        result = driver.execute_script(f"""
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '{api_url}', false);
+            xhr.send();
+            return xhr.responseText;
+        """)
+
+        import json
+        data = json.loads(result)
+        menus = data.get("message", {}).get("result", {}).get("menus", [])
+
+        # menuType "B" (일반 게시판)만 필터
+        boards = [m for m in menus if m.get("menuType") == "B"]
+        _log(f"게시판 {len(boards)}개 발견")
+
+        if boards:
+            # 첫 번째 일반 게시판 반환
+            board = boards[0]
+            _log(f"글쓰기 가능 게시판: {board['name']} (메뉴ID: {board['menuId']})")
+            return str(board["menuId"])
+
+        _log("글쓰기 가능한 게시판 없음")
+        return ""
+
+    except Exception as e:
+        _log(f"게시판 탐색 실패: {str(e)[:60]}")
+        return ""
+
+
+def get_article_list(driver, cafe_url, menu_id, page=1, log_fn=None):
+    """지정 게시판의 게시글 목록 가져오기."""
+    _log = log_fn or (lambda msg: logger.info(msg))
+    articles = []
+    try:
+        # 게시판 페이지 접속
+        board_url = f"{cafe_url}/ArticleList.nhn?search.clubid=&search.menuid={menu_id}&search.page={page}"
+        driver.get(f"{cafe_url}?iframe_url=/ArticleList.nhn%3Fsearch.menuid%3D{menu_id}%26search.page%3D{page}")
+        time.sleep(3)
+
+        # iframe 전환
+        try:
+            iframe = driver.find_element(By.CSS_SELECTOR, "iframe#cafe_main")
+            driver.switch_to.frame(iframe)
+            time.sleep(1)
+        except:
+            pass
+
+        # 게시글 행 파싱
+        rows = driver.find_elements(By.CSS_SELECTOR, ".article-board .board-list .inner_list, tr.board-list-item")
+        for row in rows:
+            try:
+                # 제목 + 링크
+                title_el = row.find_elements(By.CSS_SELECTOR, "a.article")
+                if not title_el:
+                    continue
+                title = title_el[0].text.strip()
+                href = title_el[0].get_attribute("href") or ""
+
+                # 글번호 추출
+                article_id = ""
+                match = re.search(r'articleid=(\d+)', href)
+                if match:
+                    article_id = match.group(1)
+
+                # 작성자 등급
+                grade_el = row.find_elements(By.CSS_SELECTOR, "img.mem_level, .member_level, .level_icon")
+                grade_alt = ""
+                if grade_el:
+                    grade_alt = grade_el[0].get_attribute("alt") or grade_el[0].get_attribute("title") or ""
+
+                articles.append({
+                    "title": title,
+                    "article_id": article_id,
+                    "href": href,
+                    "author_grade": grade_alt,
+                })
+            except:
+                continue
+
+        driver.switch_to.default_content()
+        _log(f"게시글 {len(articles)}개 수집 (페이지 {page})")
+        return articles
+
+    except Exception as e:
+        _log(f"게시글 목록 실패: {str(e)[:60]}")
+        try:
+            driver.switch_to.default_content()
+        except:
+            pass
+        return []
+
+
+# ═══════════════════════════════════════════════
+# 답글 작성
+# ═══════════════════════════════════════════════
+
+def write_reply(driver, cafe_url, article_id, content, log_fn=None):
+    """게시글에 답글(댓글) 작성."""
+    _log = log_fn or (lambda msg: logger.info(msg))
+    try:
+        # 게시글 접속
+        article_url = f"{cafe_url}?iframe_url=/ArticleRead.nhn%3Farticleid%3D{article_id}"
+        driver.get(article_url)
+        time.sleep(3)
+
+        # iframe 전환
+        try:
+            iframe = driver.find_element(By.CSS_SELECTOR, "iframe#cafe_main")
+            driver.switch_to.frame(iframe)
+            time.sleep(1)
+        except:
+            pass
+
+        # 댓글 입력 영역 찾기
+        comment_input = driver.find_elements(By.CSS_SELECTOR, ".comment_inbox .comment_input, textarea.comment_input")
+        if not comment_input:
+            # 에디터 클릭해서 활성화
+            comment_area = driver.find_elements(By.CSS_SELECTOR, ".comment_box, .CommentWriter")
+            if comment_area:
+                comment_area[0].click()
+                time.sleep(1)
+                comment_input = driver.find_elements(By.CSS_SELECTOR, ".comment_inbox .comment_input, textarea.comment_input")
+
+        if not comment_input:
+            _log("댓글 입력 영역 못 찾음")
+            driver.switch_to.default_content()
+            return False
+
+        # 댓글 입력
+        comment_input[0].click()
+        time.sleep(0.3)
+        pyperclip.copy(content)
+        comment_input[0].send_keys(Keys.CONTROL, "a")
+        comment_input[0].send_keys(Keys.CONTROL, "v")
+        time.sleep(0.5)
+
+        # 등록 버튼 클릭
+        submit_btn = driver.find_elements(By.CSS_SELECTOR, ".btn_register, button.btn_submit, a.btn_register")
+        if submit_btn:
+            submit_btn[0].click()
+            time.sleep(2)
+            _log(f"답글 작성 완료: {content[:20]}...")
+            driver.switch_to.default_content()
+            return True
+        else:
+            _log("등록 버튼 못 찾음")
+            driver.switch_to.default_content()
+            return False
+
+    except Exception as e:
+        _log(f"답글 작성 실패: {str(e)[:60]}")
+        try:
+            driver.switch_to.default_content()
+        except:
+            pass
+        return False
+
+
+# ═══════════════════════════════════════════════
+# 카페 작업 실행 (OFF 모드: 지정 게시판 답글)
+# ═══════════════════════════════════════════════
+
+def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
+    """
+    카페 작업 실행.
+    - OFF 모드 (menu_id 있음): 지정 게시판 → 답글
+    - ON 모드 (menu_id 없음): 글쓰기 가능 게시판 자동 탐색 → 답글
+    """
+    _log = log_fn or (lambda msg: logger.info(msg))
+    cafe_url = account.get("cafe_url", "")
+    menu_id = account.get("menu_id", "")
+    post_count = account.get("post_count", 1)
+
+    # 메뉴ID 없으면 자동 탐색
+    if not menu_id:
+        _log("메뉴ID 없음 - 글쓰기 가능 게시판 자동 탐색")
+        menu_id = find_writable_board(driver, cafe_url, _log)
+        if not menu_id:
+            _log("글쓰기 가능한 게시판 못 찾음")
+            return {"ok": False, "msg": "글쓰기 가능 게시판 없음", "written": 0}
+
+    written = 0
+    contents = settings.get("contents", [])
+    if not contents:
+        _log("원고 없음")
+        return {"ok": False, "msg": "원고 없음", "written": 0}
+
+    page_lo = settings.get("page_lo", 1)
+    page_hi = settings.get("page_hi", 10)
+    delay_lo = settings.get("delay_lo", 3)
+    delay_hi = settings.get("delay_hi", 8)
+    grade_filter = settings.get("grade_filter", list(range(6)))
+
+    # 카페 등급 정보
+    grade_info = cafe_grades.get(cafe_url, {})
+    grade_order = grade_info.get("grade_order", {})
+
+    for page in range(page_lo, page_hi + 1):
+        if written >= post_count:
+            break
+
+        _log(f"페이지 {page} 게시글 수집 중...")
+        articles = get_article_list(driver, cafe_url, menu_id, page, _log)
+
+        for article in articles:
+            if written >= post_count:
+                break
+
+            # 등급 필터 (TODO: 작성자 등급과 grade_order 매핑 필요)
+            # 지금은 필터 없이 진행
+
+            # 원고 선택 (순환)
+            content = contents[written % len(contents)]
+
+            _log(f"답글 작성: [{article['title'][:20]}] article_id={article['article_id']}")
+            success = write_reply(driver, cafe_url, article["article_id"], content, _log)
+
+            if success:
+                written += 1
+                _log(f"답글 {written}/{post_count} 완료")
+
+                # 딜레이
+                delay = random.randint(delay_lo, delay_hi)
+                _log(f"딜레이 {delay}초...")
+                time.sleep(delay)
+
+    _log(f"카페 작업 완료: {written}/{post_count}개 작성")
+    return {"ok": written > 0, "msg": f"{written}/{post_count}개 작성", "written": written}
