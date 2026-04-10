@@ -383,31 +383,12 @@ def _handle_protection(driver, account, url, page, _log):
                 btn.click()
                 time.sleep(3)
                 dismiss_alert(driver)
-                # 해제 페이지 로딩 대기 (최대 10초)
-                for _ in range(20):
-                    url2, page2 = get_page_safe(driver)
-                    if "생년월일" in page2 or "휴대전화" in page2 or "휴대폰" in page2 or "+82" in page2:
-                        break
-                    time.sleep(0.5)
-                else:
-                    url2, page2 = get_page_safe(driver)
-
-                if "생년월일" in page2:
-                    if account.get("name") and account.get("birth"):
-                        result = _solve_birthday(driver, account, _log)
-                        if result:
-                            return result
-                    return {"ok": False, "msg": "보호조치 - 생년월일 인증 (개인정보 없음)", "error": "blocked_birthday"}
-                elif "휴대전화" in page2 or "휴대폰" in page2 or "+82" in page2:
-                    return {"ok": False, "msg": "보호조치 - 핸드폰 인증 (해제 불가)", "error": "blocked_phone"}
-                else:
-                    try:
-                        with open(f"protection_debug_{nid}.html", "w", encoding="utf-8") as f:
-                            f.write(driver.page_source)
-                        _log(f"보호조치 해제 방식 불명 - protection_debug_{nid}.html 저장, URL: {url2[:60]}")
-                    except:
-                        pass
-                    return {"ok": False, "msg": "보호조치 - 해제 방식 불명", "error": "blocked_unknown"}
+                # 바로 생년월일 입력 시도 (login_test_uc.py와 동일)
+                if account.get("name") and account.get("birth"):
+                    result = _solve_birthday(driver, account, _log)
+                    if result:
+                        return result
+                return {"ok": False, "msg": "보호조치 - 생년월일 인증 (개인정보 없음)", "error": "blocked_birthday"}
         except:
             continue
     return {"ok": False, "msg": "영구정지 (해제 불가)", "error": "permanent_ban"}
