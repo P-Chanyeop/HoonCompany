@@ -505,60 +505,12 @@ class LoginWorkerThread(QThread):
             r["ok"] and r["worker"] == i for r in self.results)]
 
         if logged_in and not self._stop_flag:
-            # ── 2단계: 카페별 등급 조회 (캐시) ──
+            import threading
             cafe_grades = {}  # {cafe_url: grade_info}
-            unique_cafes = set()
-            for _, grp, _ in logged_in:
-                for task in grp.get("tasks", []):
-                    if task.get("cafe_url"):
-                        unique_cafes.add(task["cafe_url"])
+            cafe_grades_lock = threading.Lock()
 
-            if unique_cafes:
-                self.log_signal.emit(f"=== 2단계: 카페 등급 조회 ({len(unique_cafes)}개 카페, 병렬) ===")
-
-                # 카페별로 워커 1개씩 배정
-                cafe_worker_map = {}
-                used_workers = set()
-                for cafe_url in unique_cafes:
-                    for w_idx, w_grp, w_drv in logged_in:
-                        if any(t.get("cafe_url") == cafe_url for t in w_grp.get("tasks", [])) and w_idx not in used_workers:
-                            cafe_worker_map[cafe_url] = (w_idx, w_drv)
-                            used_workers.add(w_idx)
-                            break
-                    if cafe_url not in cafe_worker_map:
-                        for w_idx, w_grp, w_drv in logged_in:
-                            if w_idx not in used_workers:
-                                cafe_worker_map[cafe_url] = (w_idx, w_drv)
-                                used_workers.add(w_idx)
-                                break
-
-                def grade_task(cafe_url, w_idx, w_drv):
-                    self.log_signal.emit(f"  카페 등급 조회: {cafe_url} (워커#{w_idx+1} 사용)")
-                    try:
-                        grade_info = func.get_cafe_grades(
-                            w_drv, cafe_url,
-                            lambda msg, _w=w_idx: self.log_signal.emit(f"    [워커#{_w+1}] {msg}")
-                        )
-                        if grade_info["grades"]:
-                            return cafe_url, grade_info
-                        self.log_signal.emit(f"  [{cafe_url}] 등급 조회 실패")
-                    except Exception as e:
-                        self.log_signal.emit(f"  [{cafe_url}] 등급 조회 에러: {str(e)[:40]}")
-                    return cafe_url, None
-
-                with concurrent.futures.ThreadPoolExecutor(max_workers=len(cafe_worker_map)) as pool:
-                    futures = [
-                        pool.submit(grade_task, url, w_idx, w_drv)
-                        for url, (w_idx, w_drv) in cafe_worker_map.items()
-                    ]
-                    for f in concurrent.futures.as_completed(futures):
-                        url, info = f.result()
-                        if info:
-                            cafe_grades[url] = info
-                            self.log_signal.emit(f"  등급 조회 성공: {url} → {list(info['grades'].values())}")
-
-            # ── 3단계: 카페 접속 병렬 실행 ──
-            self.log_signal.emit(f"=== 3단계: 카페 접속 (병렬 {len(logged_in)}개) ===")
+            # ── 2단계: 카페 접속 + 등급 조회 + 작업 (병렬) ──
+            self.log_signal.emit(f"=== 2단계: 카페 작업 (병렬 {len(logged_in)}개) ===")
 
             def cafe_task(worker_idx, grp, drv):
                 log_fn = lambda msg: self.log_signal.emit(f"  워커#{worker_idx+1} {msg}")
@@ -578,16 +530,21 @@ class LoginWorkerThread(QThread):
                     self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 카페 접속: {cafe_short}")
 
                     try:
-                        # task를 account 형태로 변환
                         acc_for_task = {**grp, **task}
                         cafe_result = func.visit_cafe(drv, acc_for_task, log_fn)
 
                         if cafe_result.get("ok"):
+                            # 등급 조회 (캐시 — 같은 카페면 1번만)
+                            with cafe_grades_lock:
+                                if cafe_url not in cafe_grades:
+                                    self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 등급 조회: {cafe_short}")
+                                    grade_info = func.get_cafe_grades(drv, cafe_url, log_fn)
+                                    cafe_grades[cafe_url] = grade_info
+
                             self.worker_update.emit(worker_idx, f"답글 작성: {cafe_short}")
                             work_result = func.do_cafe_work(drv, acc_for_task, cafe_grades, self.settings, log_fn)
                             self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {work_result['msg']}")
                         elif cafe_result.get("need_join") and self.settings.get("auto_join"):
-                            # 자동 가입 ON + 미가입 → 가입 시도 (TODO) + 게시판 탐색
                             self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 미가입 - 자동가입 ON (가입 로직 미구현)")
                             self.worker_update.emit(worker_idx, f"미가입: {cafe_short} (가입 미구현)")
                         else:
@@ -638,20 +595,39 @@ class CafeWriterTab(QWidget):
 
         # ── 원고 폴더 ──
         content_group = QGroupBox("원고 관리")
-        cg = QGridLayout(content_group)
+        cg = QVBoxLayout(content_group)
 
-        cg.addWidget(QLabel("원고 폴더:"), 0, 0)
+        # 폴더 선택 행
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(QLabel("원고 대폴더:"))
         self.content_folder = QLineEdit()
-        self.content_folder.setPlaceholderText("원고 파일이 있는 폴더")
-        cg.addWidget(self.content_folder, 0, 1)
+        self.content_folder.setPlaceholderText("대폴더 경로 (소폴더들이 들어있는 상위 폴더)")
+        folder_row.addWidget(self.content_folder)
         btn_folder = QPushButton("폴더 선택")
         btn_folder.setProperty("class", "secondary")
         btn_folder.setFixedWidth(80)
         btn_folder.clicked.connect(self._browse_folder)
-        cg.addWidget(btn_folder, 0, 2)
+        folder_row.addWidget(btn_folder)
         self.lbl_content_count = QLabel("원고: 0개")
-        self.lbl_content_count.setStyleSheet("color: #606070;")
-        cg.addWidget(self.lbl_content_count, 0, 3)
+        self.lbl_content_count.setStyleSheet("color: #606070; font-weight: bold;")
+        folder_row.addWidget(self.lbl_content_count)
+        cg.addLayout(folder_row)
+
+        # 소폴더(원고) 리스트 테이블
+        self.manuscript_table = QTableWidget(0, 4)
+        self.manuscript_table.setHorizontalHeaderLabels(["키워드(폴더명)", "txt", "이미지", "경로"])
+        mh = self.manuscript_table.horizontalHeader()
+        mh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        mh.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        mh.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        mh.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.manuscript_table.setColumnWidth(1, 40)
+        self.manuscript_table.setColumnWidth(2, 50)
+        self.manuscript_table.setMaximumHeight(180)
+        self.manuscript_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.manuscript_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.manuscript_table.setAlternatingRowColors(True)
+        cg.addWidget(self.manuscript_table)
 
         left_layout.addWidget(content_group)
 
@@ -847,12 +823,19 @@ class CafeWriterTab(QWidget):
             target.setText(path)
 
     def _browse_folder(self):
-        path = QFileDialog.getExistingDirectory(self, "폴더 선택")
+        path = QFileDialog.getExistingDirectory(self, "원고 대폴더 선택")
         if path:
             self.content_folder.setText(path)
-            import os
-            count = len([f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))])
-            self.lbl_content_count.setText(f"원고: {count}개")
+            # 소폴더 스캔 (랜덤 순서)
+            items = func.get_manuscript_display_list(path)
+            self.manuscript_table.setRowCount(len(items))
+            for i, item in enumerate(items):
+                self.manuscript_table.setItem(i, 0, QTableWidgetItem(item["name"]))
+                self.manuscript_table.setItem(i, 1, QTableWidgetItem(str(item["txt_count"])))
+                self.manuscript_table.setItem(i, 2, QTableWidgetItem(str(item["img_count"])))
+                self.manuscript_table.setItem(i, 3, QTableWidgetItem(item["path"]))
+            self.lbl_content_count.setText(f"원고: {len(items)}개")
+            self._log(f"원고 폴더 로드: {len(items)}개 키워드 (랜덤 나열)")
 
     def _log(self, msg):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -915,6 +898,17 @@ class CafeWriterTab(QWidget):
 
         self._log(f"작업 시작 — 계정 {len(accounts)}행 → {len(groups)}개 워커 / 프록시 {len(proxies)}개")
 
+        # 원고 로드
+        ms_folder = self.content_folder.text().strip()
+        manuscripts = func.load_manuscripts(ms_folder) if ms_folder else []
+        if not manuscripts:
+            QMessageBox.warning(self, "알림", "원고 폴더를 선택하고 소폴더(키워드)가 있는지 확인해주세요.")
+            self.btn_start.setEnabled(True)
+            self.btn_pause.setEnabled(False)
+            self.btn_stop.setEnabled(False)
+            return
+        self._log(f"원고 {len(manuscripts)}개 로드 완료 (랜덤 셔플)")
+
         # 설정 수집
         settings = {
             "page_lo": self.page_lo.value(),
@@ -923,7 +917,8 @@ class CafeWriterTab(QWidget):
             "delay_hi": self.delay_hi.value(),
             "grade_filter": [i for i, (n, cb) in enumerate(self.grade_checks.items()) if cb.isChecked()],
             "auto_join": self.chk_auto_join.isChecked(),
-            "contents": [],  # TODO: 원고 폴더에서 로드
+            "manuscripts": manuscripts,
+            "contents": [],
         }
 
         # 워커 스레드 시작

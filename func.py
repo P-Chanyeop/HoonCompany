@@ -15,6 +15,8 @@ import configparser
 from datetime import datetime
 from typing import Optional, Callable
 
+from PIL import Image as PILImage
+
 import undetected_chromedriver as uc
 # from selenium import webdriver
 # from selenium.webdriver.chrome.options import Options
@@ -186,6 +188,261 @@ def load_proxies(filepath):
             if line and not line.startswith("#"):
                 proxies.append(line)
     return proxies
+
+
+# ═══════════════════════════════════════════════
+# 원고 로더 (폴더 기반)
+# ═══════════════════════════════════════════════
+
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+
+
+def load_manuscripts(root_folder):
+    """
+    대폴더 경로를 받아 소폴더들을 스캔하여 원고 리스트 반환.
+    소폴더 1개 = 키워드 1개 = 원고 1세트.
+
+    반환: [
+        {
+            "folder": 소폴더 절대경로,
+            "name": 소폴더명 (키워드),
+            "title": "#제목" 파싱 결과,
+            "body_parts": [str|{"type":"photo","files":[path,...]},...],
+            "images": [이미지 절대경로 리스트 (파일명 오름차순)],
+        }, ...
+    ]
+    리스트는 랜덤 셔플된 상태로 반환.
+    """
+    if not root_folder or not os.path.isdir(root_folder):
+        return []
+
+    manuscripts = []
+    for entry in os.listdir(root_folder):
+        sub = os.path.join(root_folder, entry)
+        if not os.path.isdir(sub):
+            continue
+
+        # 재귀: 소폴더 안에 또 폴더가 있으면 그 안의 폴더들도 소폴더로 취급
+        has_child_dirs = any(os.path.isdir(os.path.join(sub, c)) for c in os.listdir(sub))
+        if has_child_dirs:
+            # 이건 대폴더 역할 → 하위 소폴더들을 재귀 스캔
+            manuscripts.extend(load_manuscripts(sub))
+        else:
+            ms = _parse_manuscript_folder(sub)
+            if ms:
+                manuscripts.append(ms)
+
+    random.shuffle(manuscripts)
+    return manuscripts
+
+
+def _parse_manuscript_folder(folder_path):
+    """소폴더 1개를 파싱하여 원고 dict 반환."""
+    files = os.listdir(folder_path)
+
+    # 이미지 수집 (파일명 오름차순)
+    images = sorted(
+        [os.path.join(folder_path, f) for f in files if os.path.splitext(f)[1].lower() in IMAGE_EXTS],
+        key=lambda p: os.path.basename(p).lower()
+    )
+
+    # txt 파일 찾기 (첫 번째 txt)
+    txt_files = [f for f in files if f.lower().endswith(".txt")]
+    if not txt_files:
+        return None
+
+    txt_path = os.path.join(folder_path, txt_files[0])
+    try:
+        with open(txt_path, "r", encoding="utf-8") as f:
+            raw = f.read()
+    except:
+        try:
+            with open(txt_path, "r", encoding="cp949") as f:
+                raw = f.read()
+        except:
+            return None
+
+    title, body_parts = _parse_txt(raw, images)
+
+    return {
+        "folder": folder_path,
+        "name": os.path.basename(folder_path),
+        "title": title,
+        "body_parts": body_parts,
+        "images": images,
+    }
+
+
+def _parse_txt(raw_text, images):
+    """
+    txt 파일 파싱.
+    #제목 → 제목
+    #본문 → 본문 (내부에 #사진 태그 포함)
+
+    body_parts: 텍스트와 이미지 삽입 지점을 구분한 리스트
+      - str: 텍스트 블록
+      - {"type": "photo", "files": [path, ...]}:
+          files가 1개면 단일 이미지, 2개 이상이면 콜라주 대상
+
+    반환: (title, body_parts)
+    """
+    title = ""
+    body_raw = ""
+
+    # #제목 / #본문 분리
+    lines = raw_text.replace("\r\n", "\n").split("\n")
+    section = None
+    title_lines = []
+    body_lines = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "#제목":
+            section = "title"
+            continue
+        elif stripped == "#본문":
+            section = "body"
+            continue
+        # #댓글 등 다른 태그는 무시
+        elif stripped.startswith("#") and stripped not in ("#사진",) and section != "body":
+            section = "ignore"
+            continue
+
+        if section == "title":
+            title_lines.append(line)
+        elif section == "body":
+            body_lines.append(line)
+
+    title = "\n".join(title_lines).strip()
+    body_raw = "\n".join(body_lines)
+
+    # body에서 #사진 태그 처리
+    # 연속 #사진은 콜라주로 묶어야 함
+    body_parts = []
+    img_idx = 0
+
+    # 줄 단위로 처리하여 연속 #사진 감지
+    buf_text = []
+    buf_photos = []  # 연속 #사진에 매핑될 이미지 경로들
+
+    for line in body_raw.split("\n"):
+        if line.strip() == "#사진":
+            # 텍스트 버퍼가 있으면 먼저 flush
+            if buf_text:
+                body_parts.append("\n".join(buf_text))
+                buf_text = []
+            # 이미지 매핑
+            if img_idx < len(images):
+                buf_photos.append(images[img_idx])
+                img_idx += 1
+            else:
+                buf_photos.append(None)  # 이미지 부족
+        else:
+            # #사진이 아닌 줄 → 연속 사진 버퍼 flush
+            if buf_photos:
+                valid = [p for p in buf_photos if p]
+                if valid:
+                    body_parts.append({"type": "photo", "files": valid})
+                buf_photos = []
+            buf_text.append(line)
+
+    # 남은 버퍼 flush
+    if buf_photos:
+        valid = [p for p in buf_photos if p]
+        if valid:
+            body_parts.append({"type": "photo", "files": valid})
+    if buf_text:
+        text = "\n".join(buf_text).strip()
+        if text:
+            body_parts.append(text)
+
+    return title, body_parts
+
+
+def create_collage(image_paths, output_path=None):
+    """
+    이미지들을 횡방향(가로)으로 병합하여 콜라주 생성.
+    높이는 가장 큰 이미지에 맞추고, 나머지는 비율 유지하며 리사이즈.
+
+    Args:
+        image_paths: 이미지 파일 경로 리스트
+        output_path: 저장 경로 (None이면 임시파일)
+
+    Returns:
+        저장된 콜라주 이미지 경로
+    """
+    if not image_paths:
+        return None
+    if len(image_paths) == 1:
+        return image_paths[0]  # 1장이면 그대로
+
+    imgs = [PILImage.open(p) for p in image_paths]
+
+    # 최대 높이에 맞춰 리사이즈
+    max_h = max(img.height for img in imgs)
+    resized = []
+    for img in imgs:
+        if img.height != max_h:
+            ratio = max_h / img.height
+            new_w = int(img.width * ratio)
+            img = img.resize((new_w, max_h), PILImage.LANCZOS)
+        resized.append(img)
+
+    total_w = sum(img.width for img in resized)
+    collage = PILImage.new("RGB", (total_w, max_h), (255, 255, 255))
+
+    x = 0
+    for img in resized:
+        collage.paste(img, (x, 0))
+        x += img.width
+
+    if not output_path:
+        import tempfile
+        fd, output_path = tempfile.mkstemp(suffix=".jpg")
+        os.close(fd)
+
+    collage.save(output_path, "JPEG", quality=92)
+    for img in imgs:
+        img.close()
+    for img in resized:
+        try:
+            img.close()
+        except:
+            pass
+
+    return output_path
+
+
+def get_manuscript_display_list(root_folder):
+    """대폴더 스캔 → 소폴더 리스트 (랜덤 순서). GUI 테이블용."""
+    if not root_folder or not os.path.isdir(root_folder):
+        return []
+
+    result = []
+
+    def _scan(folder):
+        for entry in sorted(os.listdir(folder)):
+            sub = os.path.join(folder, entry)
+            if not os.path.isdir(sub):
+                continue
+            children = [c for c in os.listdir(sub) if os.path.isdir(os.path.join(sub, c))]
+            if children:
+                _scan(sub)  # 대폴더 → 재귀
+            else:
+                # 소폴더: 파일 카운트
+                files = os.listdir(sub)
+                txt_count = len([f for f in files if f.lower().endswith(".txt")])
+                img_count = len([f for f in files if os.path.splitext(f)[1].lower() in IMAGE_EXTS])
+                result.append({
+                    "name": entry,
+                    "path": sub,
+                    "txt_count": txt_count,
+                    "img_count": img_count,
+                })
+
+    _scan(root_folder)
+    random.shuffle(result)
+    return result
 
 
 # ═══════════════════════════════════════════════
@@ -748,7 +1005,7 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
             _log("등급 목록 비어있음")
             return empty
 
-        grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}, "grade_order": {}, "is_member": result.get("isCafeMember", False)}
+        grade_info = {"my_grade": -1, "my_grade_text": "", "grades": {}, "grade_order": {}, "name_to_idx": {}, "level_to_idx": {}, "is_member": result.get("isCafeMember", False), "clubid": club_id}
         for idx, lv in enumerate(level_list):
             level, name = lv["memberlevel"], lv["memberlevelname"]
             conds = []
@@ -759,6 +1016,8 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
             cond_str = ", ".join(conds) if conds else "자동/수동"
             grade_info["grades"][level] = f"{name} ({cond_str})"
             grade_info["grade_order"][idx] = {"level": level, "name": name, "cond": cond_str}
+            grade_info["name_to_idx"][name] = idx  # "독취주임" → 1
+            grade_info["level_to_idx"][level] = idx  # 110 → 1
             _log(f"등급 {idx}: {name} — {cond_str}")
             if lv.get("existmember") == "Y":
                 grade_info["my_grade"] = idx
@@ -878,52 +1137,47 @@ def visit_cafe(driver, account, log_fn=None):
 # 게시글 목록 가져오기
 # ═══════════════════════════════════════════════
 
-def find_writable_board(driver, cafe_url, log_fn=None):
+def find_writable_board(driver, cafe_url, cafe_grades=None, log_fn=None):
     """카페에서 글쓰기 가능한 게시판 자동 탐색 (API). 메뉴ID 반환."""
     _log = log_fn or (lambda msg: logger.info(msg))
     try:
-        # clubid 가져오기
-        driver.get(cafe_url)
-        time.sleep(3)
-        dismiss_alert(driver)
-        _close_cafe_popups(driver)
+        # clubid — cafe_grades에서 가져오기
+        clubid = ""
+        if cafe_grades and cafe_url in cafe_grades:
+            clubid = cafe_grades[cafe_url].get("clubid", "")
 
-        page = driver.page_source
-        match = re.search(r'clubid["\s:=]+(\d+)', page)
-        if not match:
-            _log("clubid 못 찾음")
-            return ""
-        clubid = match.group(1)
-
-        # 메뉴 API 호출 (카페 페이지에서 XHR)
-        import json
-        api_url = f"https://apis.naver.com/cafe-web/cafe-cafemain-api/v1.0/cafes/{clubid}/menus"
-
-        # 카페 페이지에서 호출해야 CORS 통과
-        if "cafe.naver.com" not in driver.current_url:
-            driver.get(cafe_url)
-            time.sleep(2)
-
-        resp_text = driver.execute_script(
-            "var x=new XMLHttpRequest();x.open('GET',arguments[0],false);x.send();return x.responseText;",
-            api_url
-        )
-
-        if not resp_text or resp_text.strip() == "":
-            _log("메뉴 API 빈 응답")
+        if not clubid:
+            _log("clubid 없음")
             return ""
 
-        data = json.loads(resp_text)
-        menus = data.get("message", {}).get("result", {}).get("menus", [])
+        # 에디터 메뉴 API 호출 (writable 필드로 글쓰기 가능 여부 확인)
+        import json, requests as req
+        api_url = f"https://apis.naver.com/cafe-web/cafe-cafeinfo-api/v1.0/cafes/{clubid}/editor/menus"
 
-        # menuType "B" (일반 게시판)만 필터
-        boards = [m for m in menus if m.get("menuType") == "B"]
-        _log(f"게시판 {len(boards)}개 발견")
+        cookies = {c["name"]: c["value"] for c in driver.get_cookies()}
+        headers = {
+            "Referer": cafe_url,
+            "Origin": "https://cafe.naver.com",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+            "x-cafe-product": "pc",
+        }
+        resp = req.get(api_url, cookies=cookies, headers=headers)
+        _log(f"에디터 메뉴 API 상태: {resp.status_code}")
 
-        if boards:
-            # 첫 번째 일반 게시판 반환
-            board = boards[0]
-            _log(f"글쓰기 가능 게시판: {board['name']} (메뉴ID: {board['menuId']})")
+        if resp.status_code != 200:
+            _log(f"에디터 메뉴 API 실패: {resp.status_code}")
+            return ""
+
+        data = resp.json()
+        menus = data.get("result", [])
+
+        # writable: true인 일반 게시판만 필터
+        writable_boards = [m for m in menus if m.get("writable") and m.get("menuType") == "B"]
+        _log(f"글쓰기 가능 게시판 {len(writable_boards)}개 / 전체 {len(menus)}개")
+
+        if writable_boards:
+            board = random.choice(writable_boards)
+            _log(f"선택 게시판: {board['menuName']} (메뉴ID: {board['menuId']}, writeLevel: {board.get('writeLevel')})")
             return str(board["menuId"])
 
         _log("글쓰기 가능한 게시판 없음")
@@ -1067,6 +1321,17 @@ def write_reply(driver, cafe_url, article_id, content, log_fn=None):
 # 카페 작업 실행 (OFF 모드: 지정 게시판 답글)
 # ═══════════════════════════════════════════════
 
+def _flatten_body(body_parts):
+    """body_parts를 텍스트로 평탄화 (이미지 부분은 [사진] 표시)."""
+    result = []
+    for part in body_parts:
+        if isinstance(part, str):
+            result.append(part)
+        elif isinstance(part, dict) and part.get("type") == "photo":
+            result.append("[사진]")
+    return "\n".join(result)
+
+
 def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
     """
     카페 작업 실행.
@@ -1081,14 +1346,15 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
     # 메뉴ID 없으면 자동 탐색
     if not menu_id:
         _log("메뉴ID 없음 - 글쓰기 가능 게시판 자동 탐색")
-        menu_id = find_writable_board(driver, cafe_url, _log)
+        menu_id = find_writable_board(driver, cafe_url, cafe_grades, _log)
         if not menu_id:
             _log("글쓰기 가능한 게시판 못 찾음")
             return {"ok": False, "msg": "글쓰기 가능 게시판 없음", "written": 0}
 
     written = 0
+    manuscripts = settings.get("manuscripts", [])
     contents = settings.get("contents", [])
-    if not contents:
+    if not manuscripts and not contents:
         _log("원고 없음")
         return {"ok": False, "msg": "원고 없음", "written": 0}
 
@@ -1113,11 +1379,27 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
             if written >= post_count:
                 break
 
-            # 등급 필터 (TODO: 작성자 등급과 grade_order 매핑 필요)
-            # 지금은 필터 없이 진행
+            # 등급 필터 — 작성자 등급 텍스트를 인덱스로 변환 후 필터
+            author_grade_text = article.get("author_grade", "")
+            name_to_idx = grade_info.get("name_to_idx", {})
+            author_idx = name_to_idx.get(author_grade_text, -1)
 
-            # 원고 선택 (순환)
-            content = contents[written % len(contents)]
+            if author_idx == -1 and author_grade_text:
+                # 부분 매칭 시도 (등급명에 공백/특수문자 차이)
+                for gname, gidx in name_to_idx.items():
+                    if gname in author_grade_text or author_grade_text in gname:
+                        author_idx = gidx
+                        break
+
+            if grade_filter and author_idx not in grade_filter and author_idx != -1:
+                continue  # 필터에 안 맞으면 스킵
+
+            # 원고 선택 (랜덤 추출 — 패턴화 방지)
+            if manuscripts:
+                ms = random.choice(manuscripts)
+                content = ms.get("title", "") + "\n" + _flatten_body(ms.get("body_parts", []))
+            else:
+                content = random.choice(contents)
 
             _log(f"답글 작성: [{article['title'][:20]}] article_id={article['article_id']}")
             success = write_reply(driver, cafe_url, article["article_id"], content, _log)
