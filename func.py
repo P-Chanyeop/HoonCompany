@@ -330,8 +330,15 @@ def _handle_protection(driver, account, url, page, _log):
                 btn.click()
                 time.sleep(3)
                 dismiss_alert(driver)
-                # 해제 페이지에서 생년월일/핸드폰 판별
-                url2, page2 = get_page_safe(driver)
+                # 해제 페이지 로딩 대기 (최대 10초)
+                for _ in range(20):
+                    url2, page2 = get_page_safe(driver)
+                    if "생년월일" in page2 or "휴대전화" in page2 or "휴대폰" in page2 or "+82" in page2:
+                        break
+                    time.sleep(0.5)
+                else:
+                    url2, page2 = get_page_safe(driver)
+
                 if "생년월일" in page2:
                     if account.get("name") and account.get("birth"):
                         result = _solve_birthday(driver, account, _log)
