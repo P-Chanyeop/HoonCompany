@@ -772,11 +772,6 @@ class CafeWriterTab(QWidget):
         summary_layout.addStretch()
         worker_layout.addLayout(summary_layout)
 
-        self.progress = QProgressBar()
-        self.progress.setValue(0)
-        self.progress.setFormat("%v / %m 완료 (%p%)")
-        worker_layout.addWidget(self.progress)
-
         right_layout.addWidget(worker_group)
 
         # ── 로그 ──
@@ -882,8 +877,6 @@ class CafeWriterTab(QWidget):
             self.worker_table.setItem(i, 5, item)
 
         self.lbl_summary.setText(f"성공 0 | 생년월일 0 | 핸드폰 0 | 영구정지 0 | 캡차 0 | 보안인증 0 | 실패 0 / 총 {count}개")
-        self.progress.setMaximum(count)
-        self.progress.setValue(0)
 
         self._log(f"작업 시작 — 계정 {len(accounts)}개 / 프록시 {len(proxies)}개 / 워커 {count}개")
 
@@ -903,7 +896,6 @@ class CafeWriterTab(QWidget):
         else:
             item.setForeground(QColor("#b08800"))
         self.worker_table.setItem(idx, 5, item)
-        self.progress.setValue(self.progress.value() + 1)
         self._update_summary(self._worker_thread.results)
 
     def _on_finished(self, results):
