@@ -158,17 +158,20 @@ def join_cafe(driver, cafe_url, nickname=None, log_fn=None):
         # 4) 가입 질문 처리 (있는 경우)
         _handle_join_questions(driver, _log)
 
-        # 5) 가입 약관 동의
+        # 5) 캡차 처리
+        _solve_captcha(driver, _log)
+
+        # 6) 가입 약관 동의
         _accept_terms(driver, _log)
 
-        # 6) 가입 버튼 클릭
+        # 7) 가입 버튼 클릭
         if not _click_join_button(driver, _log):
             return {**result_base, "ok": False, "msg": "가입 버튼 클릭 실패", "error": "join_failed"}
 
         time.sleep(3)
         func.dismiss_alert(driver)
 
-        # 7) 가입 결과 확인
+        # 8) 가입 결과 확인
         url2, page2 = func.get_page_safe(driver)
 
         # 성공 판별
@@ -356,108 +359,153 @@ def _fill_nickname(driver, nickname, _log):
 
 
 def _handle_join_questions(driver, _log):
-    """가입 질문이 있으면 Gemini로 답변 생성 후 입력."""
+    """join_qna_area 기반 질문 처리 (선택형 + 서술형)"""
     try:
         _switch_to_cafe_iframe(driver)
 
-        # 가입 질문 영역 탐색
-        question_areas = driver.find_elements(By.CSS_SELECTOR,
-            ".join_question, .question_area, .join_form_question, "
-            "div[class*='question'], td.question, .CafeJoinQuestionItem"
-        )
-        if not question_areas:
-            # 텍스트로 질문 탐색
-            all_text = driver.find_elements(By.CSS_SELECTOR, "label, span, p, div.tit, th")
-            textareas = driver.find_elements(By.CSS_SELECTOR, "textarea, input[type='text']")
-            # 질문-답변 쌍 매칭
-            if not textareas:
-                return
-            questions = []
-            for ta in textareas:
-                # textarea 근처의 질문 텍스트 찾기
-                q_text = _find_nearby_question(driver, ta)
-                if q_text:
-                    questions.append((q_text, ta))
-            if not questions:
-                return
-            _log(f"가입 질문 {len(questions)}개 발견")
-            _answer_questions(questions, _log)
+        areas = driver.find_elements(By.CSS_SELECTOR, ".join_qna_area > div")
+        if not areas:
+            _log("가입 질문 없음")
             return
 
-        _log(f"가입 질문 영역 {len(question_areas)}개 발견")
-        questions = []
-        for area in question_areas:
-            q_text = area.text.strip()
-            # 해당 영역 내 또는 바로 다음의 textarea/input 찾기
-            answer_input = area.find_elements(By.CSS_SELECTOR, "textarea, input[type='text']")
-            if not answer_input:
-                try:
-                    sibling = area.find_element(By.XPATH, "following-sibling::*[1]")
-                    answer_input = sibling.find_elements(By.CSS_SELECTOR, "textarea, input[type='text']")
-                except:
-                    pass
-            if answer_input and q_text:
-                questions.append((q_text, answer_input[0]))
+        _log(f"가입 질문 {len(areas)}개 발견")
 
-        if questions:
-            _log(f"가입 질문 {len(questions)}개 발견")
-            _answer_questions(questions, _log)
+        gemini_key = func.get_gemini_key()
+        if not gemini_key:
+            _log("Gemini API 키 없음 — 질문 답변 불가")
+            return
+
+        genai.configure(api_key=gemini_key)
+        model = genai.GenerativeModel("gemini-2.5-flash")
+
+        for area in areas:
+            # 질문 텍스트
+            q_el = area.find_elements(By.CSS_SELECTOR, ".question_text")
+            q_text = q_el[0].text.strip() if q_el else ""
+            if not q_text:
+                continue
+
+            # answer 속성이 있으면 그대로 사용
+            answer_attr = area.get_attribute("answer")
+
+            # 선택형 (radio)
+            radios = area.find_elements(By.CSS_SELECTOR, "input[type='radio']")
+            if radios:
+                labels = area.find_elements(By.CSS_SELECTOR, ".answer_list label")
+                options = [lbl.text.strip() for lbl in labels]
+                _log(f"[선택] Q: {q_text[:50]}...")
+                _log(f"  선택지: {options}")
+
+                # Gemini로 최적 선택지 결정
+                prompt = (
+                    f"네이버 카페 가입 질문입니다. 가장 적절한 선택지 번호(1부터)를 숫자만 답하세요.\n"
+                    f"질문: {q_text}\n선택지:\n" +
+                    "\n".join(f"{i+1}. {o}" for i, o in enumerate(options))
+                )
+                resp = model.generate_content(prompt)
+                try:
+                    idx = int(resp.text.strip()) - 1
+                except:
+                    idx = 0
+                idx = max(0, min(idx, len(radios) - 1))
+
+                driver.execute_script("arguments[0].click();", radios[idx])
+                _log(f"  → 선택: {options[idx] if idx < len(options) else idx}")
+                time.sleep(0.3)
+                continue
+
+            # 서술형 (textarea / input)
+            ta = area.find_elements(By.CSS_SELECTOR, "textarea, input[type='text']")
+            if ta:
+                if answer_attr:
+                    answer = answer_attr.strip()
+                    _log(f"[서술] Q: {q_text[:50]}... → answer 속성 사용")
+                else:
+                    prompt = (
+                        f"네이버 카페 가입 질문에 답변해주세요.\n"
+                        f"질문: {q_text}\n"
+                        f"규칙: 자연스럽고 성의있는 한국어 1~2문장. 답변만 출력."
+                    )
+                    resp = model.generate_content(prompt)
+                    answer = resp.text.strip()
+                    _log(f"[서술] Q: {q_text[:50]}... → Gemini 생성")
+
+                ta[0].click()
+                time.sleep(0.2)
+                pyperclip.copy(answer)
+                ta[0].send_keys(Keys.CONTROL, "a")
+                ta[0].send_keys(Keys.CONTROL, "v")
+                _log(f"  → A: {answer[:50]}")
+                time.sleep(0.3)
 
     except Exception as e:
         _log(f"가입 질문 처리 실패: {str(e)[:60]}")
 
 
-def _find_nearby_question(driver, input_el):
-    """input/textarea 근처의 질문 텍스트를 찾는다."""
+def _solve_captcha(driver, _log, max_attempts=3):
+    """캡차 이미지를 Gemini 2.5 Pro로 풀기. 최대 max_attempts회 시도."""
     try:
-        # 부모 요소에서 label/span/p 텍스트 추출
-        parent = input_el.find_element(By.XPATH, "./..")
-        for _ in range(3):  # 최대 3단계 상위까지
-            labels = parent.find_elements(By.CSS_SELECTOR, "label, span.tit, p, th, dt, .tit")
-            for lbl in labels:
-                txt = lbl.text.strip()
-                if txt and len(txt) > 2 and txt != input_el.text:
-                    return txt
-            parent = parent.find_element(By.XPATH, "./..")
-    except:
-        pass
-    return None
+        _switch_to_cafe_iframe(driver)
 
+        gemini_key = func.get_gemini_key()
+        if not gemini_key:
+            _log("Gemini API 키 없음 — 캡차 풀기 불가")
+            return False
 
-def _answer_questions(questions, _log):
-    """Gemini로 가입 질문에 답변 생성 후 입력."""
-    gemini_key = func.get_gemini_key()
-    if not gemini_key:
-        _log("Gemini API 키 없음 — 질문 답변 불가")
-        return
+        genai.configure(api_key=gemini_key)
+        model = genai.GenerativeModel("gemini-2.5-pro")
 
-    genai.configure(api_key=gemini_key)
-    model = genai.GenerativeModel("gemini-2.5-flash")
+        for attempt in range(1, max_attempts + 1):
+            _log(f"캡차 시도 {attempt}/{max_attempts}")
 
-    for q_text, input_el in questions:
-        try:
+            # 재시도 시 새로고침 버튼 클릭
+            if attempt > 1:
+                try:
+                    refresh_btn = driver.find_element(By.CSS_SELECTOR, ".join_captcha_info button .join_captcha_refresh")
+                    refresh_btn.find_element(By.XPATH, "./ancestor::button").click()
+                    _log("  캡차 새로고침...")
+                    time.sleep(2)
+                except:
+                    _log("  새로고침 버튼 못 찾음")
+
+            # 캡차 이미지 찾기
+            img_el = driver.find_elements(By.CSS_SELECTOR, ".join_captcha_area img")
+            if not img_el:
+                _log("캡차 이미지 없음 — 스킵")
+                return True
+
+            # 이미지를 base64로 캡처
+            img_b64 = img_el[0].screenshot_as_base64
+
+            # Gemini 2.5 Pro로 캡차 텍스트 추출
             prompt = (
-                f"네이버 카페 가입 질문에 답변해주세요.\n"
-                f"질문: {q_text}\n\n"
-                f"규칙:\n"
-                f"- 자연스럽고 성의있는 한국어 답변\n"
-                f"- 1~2문장으로 간결하게\n"
-                f"- 카페 가입 목적에 맞는 긍정적 답변\n"
-                f"- 답변만 출력 (설명 없이)"
+                "이 이미지는 네이버 캡차입니다. 이미지에 보이는 문자를 정확히 읽어주세요.\n"
+                "규칙:\n"
+                "- 배경 노이즈와 줄을 무시하고 실제 글자만 읽으세요\n"
+                "- 대소문자를 정확히 구분하세요\n"
+                "- 글자만 출력하세요 (설명, 따옴표, 공백 없이)"
             )
-            response = model.generate_content(prompt)
-            answer = response.text.strip()
-            _log(f"Q: {q_text[:40]}... → A: {answer[:40]}...")
+            resp = model.generate_content([
+                prompt,
+                {"mime_type": "image/png", "data": base64.b64decode(img_b64) if isinstance(img_b64, str) else img_b64}
+            ])
+            captcha_text = resp.text.strip()
+            _log(f"  캡차 인식: {captcha_text}")
 
-            input_el.click()
+            # 캡차 입력
+            captcha_input = driver.find_element(By.CSS_SELECTOR, "#captcha")
+            captcha_input.clear()
             time.sleep(0.2)
-            pyperclip.copy(answer)
-            input_el.send_keys(Keys.CONTROL, "a")
-            input_el.send_keys(Keys.CONTROL, "v")
+            captcha_input.send_keys(captcha_text)
+            _log(f"  캡차 입력 완료")
             time.sleep(0.3)
+            return True
 
-        except Exception as e:
-            _log(f"질문 답변 실패: {str(e)[:40]}")
+        return False
+
+    except Exception as e:
+        _log(f"캡차 처리 실패: {str(e)[:60]}")
+        return False
 
 
 def _accept_terms(driver, _log):
