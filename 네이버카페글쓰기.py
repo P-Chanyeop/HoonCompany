@@ -507,7 +507,11 @@ class LoginWorkerThread(QThread):
         if logged_in and not self._stop_flag:
             # ── 2단계: 카페별 등급 조회 (캐시) ──
             cafe_grades = {}  # {cafe_url: grade_info}
-            unique_cafes = set(acc.get("cafe_url", "") for _, acc, _ in logged_in if acc.get("cafe_url"))
+            unique_cafes = set()
+            for _, grp, _ in logged_in:
+                for task in grp.get("tasks", []):
+                    if task.get("cafe_url"):
+                        unique_cafes.add(task["cafe_url"])
 
             if unique_cafes:
                 self.log_signal.emit(f"=== 2단계: 카페 등급 조회 ({len(unique_cafes)}개 카페, 병렬) ===")
@@ -516,13 +520,13 @@ class LoginWorkerThread(QThread):
                 cafe_worker_map = {}
                 used_workers = set()
                 for cafe_url in unique_cafes:
-                    for w_idx, w_acc, w_drv in logged_in:
-                        if w_acc.get("cafe_url") == cafe_url and w_idx not in used_workers:
+                    for w_idx, w_grp, w_drv in logged_in:
+                        if any(t.get("cafe_url") == cafe_url for t in w_grp.get("tasks", [])) and w_idx not in used_workers:
                             cafe_worker_map[cafe_url] = (w_idx, w_drv)
                             used_workers.add(w_idx)
                             break
                     if cafe_url not in cafe_worker_map:
-                        for w_idx, w_acc, w_drv in logged_in:
+                        for w_idx, w_grp, w_drv in logged_in:
                             if w_idx not in used_workers:
                                 cafe_worker_map[cafe_url] = (w_idx, w_drv)
                                 used_workers.add(w_idx)
@@ -556,37 +560,41 @@ class LoginWorkerThread(QThread):
             # ── 3단계: 카페 접속 병렬 실행 ──
             self.log_signal.emit(f"=== 3단계: 카페 접속 (병렬 {len(logged_in)}개) ===")
 
-            def cafe_task(worker_idx, acc, drv):
+            def cafe_task(worker_idx, grp, drv):
                 log_fn = lambda msg: self.log_signal.emit(f"  워커#{worker_idx+1} {msg}")
-                self.worker_update.emit(worker_idx, "카페 접속 중...")
-                try:
-                    cafe_result = func.visit_cafe(drv, acc, log_fn)
-                    if cafe_result.get("ok"):
-                        self.worker_update.emit(worker_idx, "카페 접속 완료")
-                        self.log_signal.emit(f"워커#{worker_idx+1} [{acc['id']}] 카페: {cafe_result['msg']}")
+                nid = grp["id"]
+                tasks = grp.get("tasks", [])
 
-                        # 답글 작성
-                        if acc.get("menu_id"):
-                            # OFF 모드: 지정 게시판
-                            self.worker_update.emit(worker_idx, "답글 작성 중...")
-                            work_result = func.do_cafe_work(drv, acc, cafe_grades, self.settings, log_fn)
-                            self.worker_update.emit(worker_idx, f"작업완료: {work_result['msg']}")
-                            self.log_signal.emit(f"워커#{worker_idx+1} [{acc['id']}] 작업: {work_result['msg']}")
+                for t_idx, task in enumerate(tasks):
+                    if self._stop_flag:
+                        break
+
+                    cafe_url = task.get("cafe_url", "")
+                    if not cafe_url:
+                        continue
+
+                    cafe_short = cafe_url.replace("https://cafe.naver.com/", "")
+                    self.worker_update.emit(worker_idx, f"카페 접속: {cafe_short} ({t_idx+1}/{len(tasks)})")
+                    self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 카페 접속: {cafe_short}")
+
+                    try:
+                        # task를 account 형태로 변환
+                        acc_for_task = {**grp, **task}
+                        cafe_result = func.visit_cafe(drv, acc_for_task, log_fn)
+
+                        if cafe_result.get("ok"):
+                            self.worker_update.emit(worker_idx, f"답글 작성: {cafe_short}")
+                            work_result = func.do_cafe_work(drv, acc_for_task, cafe_grades, self.settings, log_fn)
+                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {work_result['msg']}")
                         else:
-                            # ON 모드: 자동 탐색 (카페 가입은 별도)
-                            self.worker_update.emit(worker_idx, "게시판 탐색 + 답글 작성 중...")
-                            work_result = func.do_cafe_work(drv, acc, cafe_grades, self.settings, log_fn)
-                            self.worker_update.emit(worker_idx, f"작업완료: {work_result['msg']}")
-                            self.log_signal.emit(f"워커#{worker_idx+1} [{acc['id']}] 작업: {work_result['msg']}")
-                    else:
-                        self.worker_update.emit(worker_idx, f"카페: {cafe_result['msg'][:20]}")
-                        self.log_signal.emit(f"워커#{worker_idx+1} [{acc['id']}] 카페: {cafe_result['msg']}")
-                except Exception as ce:
-                    self.worker_update.emit(worker_idx, "카페 작업 에러")
-                    self.log_signal.emit(f"워커#{worker_idx+1} [{acc['id']}] 카페 에러: {str(ce)[:60]}")
+                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {cafe_result['msg']}")
+                    except Exception as ce:
+                        self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short} 에러: {str(ce)[:60]}")
+
+                self.worker_update.emit(worker_idx, f"완료 ({len(tasks)}개 카페)")
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(logged_in)) as pool:
-                futures = [pool.submit(cafe_task, i, acc, drv) for i, acc, drv in logged_in]
+                futures = [pool.submit(cafe_task, i, grp, drv) for i, grp, drv in logged_in]
                 concurrent.futures.wait(futures)
 
             self.log_signal.emit("=== 카페 접속 완료 ===")
@@ -869,7 +877,10 @@ class CafeWriterTab(QWidget):
         self.btn_stop.setEnabled(True)
 
         wc = self.worker_slider.value()
-        count = min(wc, len(accounts), len(proxies))
+
+        # 아이디별 그룹핑
+        groups = func.group_accounts_by_id(accounts)
+        count = min(wc, len(groups), len(proxies))
 
         # 프록시 셔플
         import random
@@ -877,24 +888,27 @@ class CafeWriterTab(QWidget):
 
         self.worker_table.setRowCount(count)
         for i in range(count):
-            acc = accounts[i]
+            grp = groups[i]
             proxy = proxies[i]
-            cafe = acc.get("cafe_url", "-")
-            cafe_short = cafe.replace("https://cafe.naver.com/", "") if cafe else "-"
-            menu = acc.get("menu_id", "") or "자동탐색"
+            # 첫 번째 작업의 카페 표시 (여러 개면 +N)
+            cafes = [t["cafe_url"].replace("https://cafe.naver.com/", "") for t in grp["tasks"] if t["cafe_url"]]
+            cafe_display = cafes[0] if cafes else "-"
+            if len(cafes) > 1:
+                cafe_display += f" +{len(cafes)-1}"
+            task_count = sum(t["post_count"] for t in grp["tasks"])
 
             self.worker_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-            self.worker_table.setItem(i, 1, QTableWidgetItem(acc["id"]))
+            self.worker_table.setItem(i, 1, QTableWidgetItem(grp["id"]))
             self.worker_table.setItem(i, 2, QTableWidgetItem(proxy[:20]))
-            self.worker_table.setItem(i, 3, QTableWidgetItem(cafe_short))
-            self.worker_table.setItem(i, 4, QTableWidgetItem(menu))
+            self.worker_table.setItem(i, 3, QTableWidgetItem(cafe_display))
+            self.worker_table.setItem(i, 4, QTableWidgetItem(f"{len(grp['tasks'])}개 작업"))
             item = QTableWidgetItem("대기중")
             item.setForeground(QColor("#b08800"))
             self.worker_table.setItem(i, 5, item)
 
         self.lbl_summary.setText(f"성공 0 | 생년월일 0 | 핸드폰 0 | 영구정지 0 | 캡차 0 | 보안인증 0 | 실패 0 / 총 {count}개")
 
-        self._log(f"작업 시작 — 계정 {len(accounts)}개 / 프록시 {len(proxies)}개 / 워커 {count}개")
+        self._log(f"작업 시작 — 계정 {len(accounts)}행 → {len(groups)}개 워커 / 프록시 {len(proxies)}개")
 
         # 설정 수집
         settings = {
@@ -907,7 +921,7 @@ class CafeWriterTab(QWidget):
         }
 
         # 워커 스레드 시작
-        self._worker_thread = LoginWorkerThread(accounts, proxies, count, settings)
+        self._worker_thread = LoginWorkerThread(groups, proxies, count, settings)
         self._worker_thread.log_signal.connect(self._log)
         self._worker_thread.worker_update.connect(self._update_worker_table)
         self._worker_thread.finished_signal.connect(self._on_finished)

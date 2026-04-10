@@ -83,6 +83,31 @@ def load_accounts_from_gsheet():
         return []
 
 
+def group_accounts_by_id(accounts):
+    """같은 아이디를 그룹핑. 반환: [{id, pw, name, ..., tasks: [{cafe_url, menu_id, post_count}, ...]}, ...]"""
+    from collections import OrderedDict
+    groups = OrderedDict()
+    for acc in accounts:
+        nid = acc["id"]
+        if nid not in groups:
+            groups[nid] = {
+                "id": acc["id"],
+                "pw": acc["pw"],
+                "name": acc.get("name", ""),
+                "birth": acc.get("birth", ""),
+                "gender": acc.get("gender", ""),
+                "tasks": [],
+            }
+        groups[nid]["tasks"].append({
+            "cafe_url": acc.get("cafe_url", ""),
+            "menu_id": acc.get("menu_id", ""),
+            "post_count": acc.get("post_count", 1),
+        })
+    result = list(groups.values())
+    logger.info(f"아이디 그룹핑: {len(accounts)}행 → {len(result)}개 워커")
+    return result
+
+
 # ═══════════════════════════════════════════════
 # 구글시트 쓰기
 # ═══════════════════════════════════════════════
