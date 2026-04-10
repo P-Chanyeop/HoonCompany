@@ -802,23 +802,19 @@ def visit_cafe(driver, account, log_fn=None):
         return {"ok": False, "msg": "카페 URL 없음"}
 
     try:
-        _log(f"카페 접속: {cafe_url}")
-        driver.get(cafe_url)
-        time.sleep(3)
-        dismiss_alert(driver)
-
-        # 팝업 닫기 (가입 환영 등 카페별 팝업)
-        _close_cafe_popups(driver)
+        # 이미 해당 카페에 있으면 재접속 안 함
+        cafe_id = cafe_url.rstrip("/").split("/")[-1]
+        current = driver.current_url or ""
+        if cafe_id not in current:
+            _log(f"카페 접속: {cafe_url}")
+            driver.get(cafe_url)
+            time.sleep(2)
+            dismiss_alert(driver)
+            _close_cafe_popups(driver)
+        else:
+            _log(f"카페 이미 접속 중: {cafe_id}")
 
         url, page = get_page_safe(driver)
-        _log(f"카페 현재 URL: {url}")
-
-        # 디버깅: 카페 페이지 소스 저장
-        try:
-            with open("cafe_debug.html", "w", encoding="utf-8") as f:
-                f.write(driver.page_source)
-        except:
-            pass
 
         # 카페 접속 확인
         if "cafe.naver.com" not in url:
