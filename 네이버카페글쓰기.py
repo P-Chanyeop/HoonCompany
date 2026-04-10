@@ -535,11 +535,26 @@ class LoginWorkerThread(QThread):
 
                         if cafe_result.get("ok"):
                             # 등급 조회 (캐시 — 같은 카페면 1번만)
+                            need_grade = False
                             with cafe_grades_lock:
                                 if cafe_url not in cafe_grades:
-                                    self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 등급 조회: {cafe_short}")
-                                    grade_info = func.get_cafe_grades(drv, cafe_url, log_fn)
+                                    cafe_grades[cafe_url] = None  # 예약 (다른 워커가 중복 조회 안 하게)
+                                    need_grade = True
+
+                            if need_grade:
+                                self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 등급 조회: {cafe_short}")
+                                grade_info = func.get_cafe_grades(drv, cafe_url, log_fn)
+                                with cafe_grades_lock:
                                     cafe_grades[cafe_url] = grade_info
+                            else:
+                                # 다른 워커가 조회 중이면 완료될 때까지 대기
+                                for _ in range(30):
+                                    with cafe_grades_lock:
+                                        if cafe_grades.get(cafe_url) is not None:
+                                            break
+                                    import time as _time
+                                    _time.sleep(1)
+                                self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 등급 캐시 사용: {cafe_short}")
 
                             self.worker_update.emit(worker_idx, f"작업 중: {cafe_short}")
                             self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 작업 시작")
