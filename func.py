@@ -53,13 +53,13 @@ def get_gemini_key():
 def load_accounts_from_gsheet():
     """구글시트에서 계정 로드 (A:아이디, B:비밀번호, C:성함, D:생년월일, E:성별)"""
     cfg = load_config()
-    gs_key = cfg.get("google_sheets", "api_key", fallback="")
     gs_id = cfg.get("google_sheets", "sheet_id", fallback="")
-    if not gs_key or not gs_id:
+    if not gs_id:
         return []
     try:
-        from googleapiclient.discovery import build
-        service = build('sheets', 'v4', developerKey=gs_key)
+        service = _get_sheets_service_write()
+        if not service:
+            return []
         result = service.spreadsheets().values().get(
             spreadsheetId=gs_id, range='A2:J1000'
         ).execute()
@@ -113,15 +113,28 @@ def group_accounts_by_id(accounts):
 # ═══════════════════════════════════════════════
 
 def _get_sheets_service_write():
-    """쓰기 가능한 구글시트 서비스 반환. 서비스 계정 JSON 필요."""
-    cfg = load_config()
-    sa_path = cfg.get("google_sheets", "service_account", fallback="").strip()
-    if sa_path and os.path.isfile(sa_path):
-        from google.oauth2.service_account import Credentials
-        from googleapiclient.discovery import build
-        creds = Credentials.from_service_account_file(sa_path, scopes=["https://www.googleapis.com/auth/spreadsheets"])
-        return build('sheets', 'v4', credentials=creds)
-    return None
+    """쓰기 가능한 구글시트 서비스 반환. OAuth 인증."""
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from googleapiclient.discovery import build
+
+    SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+    token_path = os.path.join(os.path.dirname(__file__), "token.json")
+    creds_path = os.path.join(os.path.dirname(__file__), "credentials.json")
+    creds = None
+
+    if os.path.isfile(token_path):
+        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open(token_path, "w") as f:
+            f.write(creds.to_json())
+    return build('sheets', 'v4', credentials=creds)
 
 
 def append_to_gsheet(rows, sheet_name="결과", log_fn=None):
