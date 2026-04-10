@@ -886,19 +886,23 @@ def find_writable_board(driver, cafe_url, log_fn=None):
             return ""
         clubid = match.group(1)
 
-        # 메뉴 API 호출 (직접 접속)
+        # 메뉴 API 호출 (카페 페이지에서 XHR)
         import json
         api_url = f"https://apis.naver.com/cafe-web/cafe-cafemain-api/v1.0/cafes/{clubid}/menus"
+
+        # 카페 페이지에서 호출해야 CORS 통과
+        if "cafe.naver.com" not in driver.current_url:
+            driver.get(cafe_url)
+            time.sleep(2)
+
         resp_text = driver.execute_script(
             "var x=new XMLHttpRequest();x.open('GET',arguments[0],false);x.send();return x.responseText;",
             api_url
         )
 
         if not resp_text or resp_text.strip() == "":
-            _log("메뉴 API 빈 응답 - driver.get으로 재시도")
-            driver.get(api_url)
-            time.sleep(2)
-            resp_text = driver.find_element(By.CSS_SELECTOR, "body").text
+            _log("메뉴 API 빈 응답")
+            return ""
 
         data = json.loads(resp_text)
         menus = data.get("message", {}).get("result", {}).get("menus", [])
