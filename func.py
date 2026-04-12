@@ -27,8 +27,13 @@ from selenium.webdriver.common.alert import Alert
 import pyperclip
 import google.generativeai as genai
 
+import threading
+
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s — %(message)s")
 logger = logging.getLogger(__name__)
+
+# 클립보드 동시 접근 방지 (병렬 워커에서 pyperclip 사용 시)
+_clipboard_lock = threading.Lock()
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
 
@@ -176,6 +181,86 @@ def append_to_gsheet(rows, sheet_name="결과", log_fn=None):
         return False
 
 
+def append_to_gsheet_with_color(rows, sheet_name="결과값", log_fn=None):
+    """
+    구글시트에 행 추가 + 성공/실패에 따라 배경색 적용.
+    성공: #d9ead2 (연두), 실패: #f4cccc (연빨강)
+    rows: [[col1, ..., col12(status), col13(error)], ...]
+    status 컬럼(인덱스 11)이 "성공"이면 연두, 아니면 연빨강.
+    """
+    _log = log_fn or (lambda msg: logger.info(msg))
+    cfg = load_config()
+    gs_id = cfg.get("google_sheets", "sheet_id", fallback="")
+    if not gs_id:
+        _log("구글시트 ID 없음")
+        return False
+    try:
+        service = _get_sheets_service_write()
+        if not service:
+            return False
+
+        # 1) 행 추가
+        service.spreadsheets().values().append(
+            spreadsheetId=gs_id,
+            range=f"{sheet_name}!A1",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": rows}
+        ).execute()
+
+        # 2) 추가된 행 위치 파악 (현재 데이터 행 수)
+        result = service.spreadsheets().values().get(
+            spreadsheetId=gs_id,
+            range=f"{sheet_name}!A:A"
+        ).execute()
+        total_rows = len(result.get("values", []))
+        start_row = total_rows - len(rows)  # 0-indexed
+
+        # 3) 시트 ID 가져오기
+        sheet_meta = service.spreadsheets().get(spreadsheetId=gs_id).execute()
+        sheet_id = 0
+        for s in sheet_meta.get("sheets", []):
+            if s["properties"]["title"] == sheet_name:
+                sheet_id = s["properties"]["sheetId"]
+                break
+
+        # 4) 배경색 적용
+        requests = []
+        for i, row in enumerate(rows):
+            status = row[11] if len(row) > 11 else ""
+            if status == "성공":
+                rgb = {"red": 0.851, "green": 0.918, "blue": 0.824}  # #d9ead2
+            else:
+                rgb = {"red": 0.957, "green": 0.800, "blue": 0.800}  # #f4cccc
+            requests.append({
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": start_row + i,
+                        "endRowIndex": start_row + i + 1,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": rgb
+                        }
+                    },
+                    "fields": "userEnteredFormat.backgroundColor"
+                }
+            })
+
+        if requests:
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=gs_id,
+                body={"requests": requests}
+            ).execute()
+
+        _log(f"구글시트 기록 완료: {len(rows)}행 → [{sheet_name}] (배경색 적용)")
+        return True
+    except Exception as e:
+        _log(f"구글시트 기록 실패: {str(e)[:60]}")
+        return False
+
+
 # ═══════════════════════════════════════════════
 # 프록시 로드
 # ═══════════════════════════════════════════════
@@ -262,13 +347,14 @@ def _parse_manuscript_folder(folder_path):
         except:
             return None
 
-    title, body_parts = _parse_txt(raw, images)
+    title, body_parts, tags = _parse_txt(raw, images)
 
     return {
         "folder": folder_path,
         "name": os.path.basename(folder_path),
         "title": title,
         "body_parts": body_parts,
+        "tags": tags,
         "images": images,
     }
 
@@ -289,11 +375,12 @@ def _parse_txt(raw_text, images):
     title = ""
     body_raw = ""
 
-    # #제목 / #본문 분리
+    # #제목 / #본문 / #태그 분리
     lines = raw_text.replace("\r\n", "\n").split("\n")
     section = None
     title_lines = []
     body_lines = []
+    tag_lines = []
 
     for line in lines:
         stripped = line.strip()
@@ -302,6 +389,9 @@ def _parse_txt(raw_text, images):
             continue
         elif stripped == "#본문":
             section = "body"
+            continue
+        elif stripped == "#태그":
+            section = "tag"
             continue
         # #댓글 등 다른 태그는 무시
         elif stripped.startswith("#") and stripped not in ("#사진", "사진 :", "사진:") and section != "body":
@@ -312,6 +402,9 @@ def _parse_txt(raw_text, images):
             title_lines.append(line)
         elif section == "body":
             body_lines.append(line)
+        elif section == "tag":
+            if stripped:  # 빈 줄 무시
+                tag_lines.append(stripped)
 
     title = "\n".join(title_lines).strip()
     body_raw = "\n".join(body_lines)
@@ -356,7 +449,7 @@ def _parse_txt(raw_text, images):
         if text:
             body_parts.append(text)
 
-    return title, body_parts
+    return title, body_parts, tag_lines
 
 
 def create_collage(image_paths, output_path=None):
@@ -740,7 +833,7 @@ def naver_login(driver, account, log_fn=None):
         url, page = get_page_safe(driver)
 
         # ── 보호조치 ──
-        if "비정상적인 활동" in page or "보호(잠금) 조치" in page or "보호하고 있습니다" in page or "idSafetyRelease" in url:
+        if "비정상적인 활동" in page or "보호(잠금) 조치" in page or "보호하고 있습니다" in page or "idSafetyRelease" in url or "로그인 제한" in page or "로그인제한" in page:
             return _handle_protection(driver, account, url, page, _log)
 
         # ── 이용제한 ──
@@ -780,11 +873,18 @@ def _handle_protection(driver, account, url, page, _log):
             txt = btn.text.strip()
             if "본인 확인" in txt:
                 return {"ok": False, "msg": "보호조치 - 핸드폰 인증 (해제 불가)", "error": "blocked_phone"}
-            if "보호조치 해제" in txt or "보호 조치 해제" in txt:
+            if "보호조치 해제" in txt or "보호 조치 해제" in txt or "로그인 제한 해제" in txt:
                 btn.click()
                 time.sleep(3)
                 dismiss_alert(driver)
-                # 바로 생년월일 입력 시도 (login_test_uc.py와 동일)
+                # 휴대전화 인증만 있는지 확인 (생년월일 라디오가 없으면 휴대전화만)
+                url2, page2 = get_page_safe(driver)
+                has_birthday = bool(driver.find_elements(By.CSS_SELECTOR, "input#r_birthDate, input[value='birthDate']"))
+                has_phone = bool(driver.find_elements(By.CSS_SELECTOR, "input#r_phoneNo, input[value='phoneNo']"))
+                if has_phone and not has_birthday:
+                    _log("보호조치 - 휴대전화 인증만 존재 (해제 불가)")
+                    return {"ok": False, "msg": "보호조치 - 핸드폰 인증 (해제 불가)", "error": "blocked_phone"}
+                # 생년월일 입력 시도
                 if account.get("name") and account.get("birth"):
                     result = _solve_birthday(driver, account, _log)
                     if result:
@@ -890,21 +990,30 @@ def _solve_birthday(driver, account, _log):
                 time.sleep(0.2)
 
             # 자동입력 방지 (최대 3회)
+            captcha_passed = False
             for try_i in range(3):
                 if _solve_text_captcha(driver, _log):
                     for btn in driver.find_elements(By.CSS_SELECTOR, "button, a, input[type='submit']"):
                         try:
                             if btn.text.strip() == "확인":
                                 btn.click()
-                                time.sleep(3)
                                 break
                         except:
                             continue
-                    url4, page4 = get_page_safe(driver)
-                    if "잘못된 자동입력" in page4 or "다시 입력" in page4:
-                        _log(f"자동입력 방지 문자 틀림 ({try_i+1}/3)")
+                    # 확인 후 3초 대기 → 에러 요소 확인
+                    time.sleep(3)
+                    err_el = driver.find_elements(By.CSS_SELECTOR, "div#e_autoValue")
+                    if err_el and err_el[0].is_displayed() and ("잘못된" in err_el[0].text or "다시 입력" in err_el[0].text):
+                        _log(f"자동입력 방지 문자 틀림 ({try_i+1}/3): {err_el[0].text.strip()[:40]}")
                         continue
+                    captcha_passed = True
                     break
+                else:
+                    _log(f"캡차 인식 실패 ({try_i+1}/3)")
+
+            if not captcha_passed:
+                _log("캡차 3회 실패 — 보호조치 해제 실패")
+                return {"ok": False, "msg": "보호조치 - 캡차 실패", "error": "captcha"}
 
             # 2단계 인증 - 나중에 하기
             time.sleep(2)
@@ -1325,7 +1434,7 @@ def get_article_list(driver, cafe_url, menu_id, page=1, club_id=None, log_fn=Non
                 "title": item.get("subject", ""),
                 "author_grade": writer.get("memberLevelName", ""),
                 "author_grade_level": writer.get("memberLevel", -1),
-                "author_nick": writer.get("nickName", ""),
+                "author_nick": writer.get("nickName", "") or writer.get("nickname", ""),
                 "secede_member": writer.get("secedeMember", False),
                 "cafe_id": str(item.get("cafeId", "")),
             })
@@ -1342,7 +1451,7 @@ def get_article_list(driver, cafe_url, menu_id, page=1, club_id=None, log_fn=Non
 # 답글 작성 (게시글 하단 "답글" 버튼 → 새 게시글 에디터)
 # ═══════════════════════════════════════════════
 
-def write_reply(driver, cafe_url, article_id, title, processed_parts, options=None, log_fn=None):
+def write_reply(driver, cafe_url, article_id, title, processed_parts, options=None, tags=None, log_fn=None):
     """
     게시글의 '답글' 버튼을 클릭하여 답글 게시글 작성.
     답글 = 해당 글에 대한 새 게시글 (댓글 아님).
@@ -1361,6 +1470,7 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
     """
     _log = log_fn or (lambda msg: logger.info(msg))
     options = options or {}
+    tags = tags or []
 
     try:
         # 게시글 접속
@@ -1421,7 +1531,22 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
             time.sleep(1)
 
         # 에디터 로드 대기
-        dismiss_alert(driver)
+        # 활동정지 alert 체크
+        try:
+            from selenium.webdriver.common.alert import Alert as _Alert
+            alert = _Alert(driver)
+            alert_text = alert.text
+            if "활동정지" in alert_text or "활동 정지" in alert_text:
+                alert.accept()
+                _log(f"❌ 활동정지 상태: {alert_text[:50]}")
+                if len(driver.window_handles) > 1:
+                    driver.close()
+                    driver.switch_to.window(driver.window_handles[0])
+                return {"ok": False, "url": "", "error": "suspended"}
+            alert.accept()
+        except:
+            pass  # alert 없으면 정상
+
         current_url = driver.current_url
         _log(f"에디터 페이지: {current_url[:60]}")
 
@@ -1433,9 +1558,10 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
         if title_input:
             title_input[0].click()
             time.sleep(0.1)
-            pyperclip.copy(title)
-            title_input[0].send_keys(Keys.CONTROL, "a")
-            title_input[0].send_keys(Keys.CONTROL, "v")
+            with _clipboard_lock:
+                pyperclip.copy(title)
+                title_input[0].send_keys(Keys.CONTROL, "a")
+                title_input[0].send_keys(Keys.CONTROL, "v")
             time.sleep(0.1)
             _log(f"제목 입력 완료: {title[:30]}")
         else:
@@ -1463,9 +1589,10 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
             if isinstance(part, str):
                 if not part.strip():
                     continue
-                pyperclip.copy(part)
                 body_el = driver.switch_to.active_element
-                body_el.send_keys(Keys.CONTROL, "v")
+                with _clipboard_lock:
+                    pyperclip.copy(part)
+                    body_el.send_keys(Keys.CONTROL, "v")
                 time.sleep(0.1)
                 body_el.send_keys(Keys.ENTER)
                 time.sleep(0.1)
@@ -1490,43 +1617,44 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
 
         _log(f"본문 입력 완료: 텍스트 {text_count}개, 이미지 {img_count}개")
 
+        # 태그 입력
+        _input_tags(driver, tags, _log)
+
         # 옵션 설정
         _set_post_options(driver, options, _log)
 
-        # ── 등록 버튼 (테스트용 주석처리 — 이미지까지만 확인) ──
-        _log("⏸ 등록 버튼 클릭 생략 (테스트 모드) — 에디터 상태에서 멈춤")
-        post_url = driver.current_url
-        return {"ok": True, "url": post_url}
+        # 등록 버튼 클릭
+        time.sleep(0.5)
+        register_btn = driver.find_elements(By.CSS_SELECTOR, "a.BaseButton--skinGreen .BaseButton__txt, a.BaseButton--skinGreen")
+        clicked = False
+        for btn in register_btn:
+            try:
+                if "등록" in btn.text.strip():
+                    _log(f"등록 버튼 클릭: [{btn.text.strip()}]")
+                    btn.click()
+                    time.sleep(2)
+                    clicked = True
+                    break
+            except:
+                continue
 
-        # time.sleep(0.5)
-        # submit_btns = driver.find_elements(By.CSS_SELECTOR, "button.btn_submit, button[class*='register'], a.btn_register, button.BaseButton")
-        # clicked = False
-        # for btn in submit_btns:
-        #     try:
-        #         txt = btn.text.strip()
-        #         if "등록" in txt or "작성" in txt:
-        #             _log(f"등록 버튼 클릭: [{txt}]")
-        #             btn.click()
-        #             time.sleep(1.5)
-        #             clicked = True
-        #             break
-        #     except:
-        #         continue
-        #
-        # if not clicked:
-        #     _log("❌ 등록 버튼 못 찾음")
-        #     return {"ok": False, "url": ""}
-        #
-        # dismiss_alert(driver)
-        # post_url = driver.current_url
-        # _log(f"답글 게시글 등록 완료 — URL: {post_url[:60]}")
-        #
-        # # 새 탭이었으면 닫고 원래 탭으로
-        # if len(driver.window_handles) > 1:
-        #     driver.close()
-        #     driver.switch_to.window(driver.window_handles[0])
-        #
-        # return {"ok": True, "url": post_url}
+        if not clicked:
+            _log("❌ 등록 버튼 못 찾음")
+            if len(driver.window_handles) > 1:
+                driver.close()
+                driver.switch_to.window(driver.window_handles[0])
+            return {"ok": False, "url": ""}
+
+        dismiss_alert(driver)
+        post_url = driver.current_url
+        _log(f"답글 게시글 등록 완료 — URL: {post_url[:60]}")
+
+        # 에디터 탭 닫고 원래 탭으로
+        if len(driver.window_handles) > 1:
+            driver.close()
+            driver.switch_to.window(driver.window_handles[0])
+
+        return {"ok": True, "url": post_url}
 
     except Exception as e:
         _log(f"❌ 답글 작성 예외: {str(e)[:60]}")
@@ -1545,7 +1673,7 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
 # 글쓰기 (새 게시글 작성)
 # ═══════════════════════════════════════════════
 
-def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, log_fn=None):
+def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, tags=None, log_fn=None):
     """
     카페에 새 게시글 작성 (에디터).
 
@@ -1564,6 +1692,7 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
     """
     _log = log_fn or (lambda msg: logger.info(msg))
     options = options or {}
+    tags = tags or []
 
     try:
         # 에디터 페이지 접속
@@ -1582,9 +1711,10 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
         if title_input:
             title_input[0].click()
             time.sleep(0.1)
-            pyperclip.copy(title)
-            title_input[0].send_keys(Keys.CONTROL, "a")
-            title_input[0].send_keys(Keys.CONTROL, "v")
+            with _clipboard_lock:
+                pyperclip.copy(title)
+                title_input[0].send_keys(Keys.CONTROL, "a")
+                title_input[0].send_keys(Keys.CONTROL, "v")
             time.sleep(0.1)
             _log(f"제목 입력 완료: {title[:30]}")
         else:
@@ -1610,9 +1740,10 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
             if isinstance(part, str):
                 if not part.strip():
                     continue
-                pyperclip.copy(part)
                 body_el = driver.switch_to.active_element
-                body_el.send_keys(Keys.CONTROL, "v")
+                with _clipboard_lock:
+                    pyperclip.copy(part)
+                    body_el.send_keys(Keys.CONTROL, "v")
                 time.sleep(0.1)
                 body_el.send_keys(Keys.ENTER)
                 time.sleep(0.1)
@@ -1638,6 +1769,9 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
                     _log("❌ 이미지 업로드 input 못 찾음")
 
         _log(f"본문 입력 완료: 텍스트 {text_count}개, 이미지 {img_count}개")
+
+        # 태그 입력
+        _input_tags(driver, tags, _log)
 
         # 옵션 설정 (댓글허용, 검색허용, 전체공개)
         _log(f"옵션 설정: 댓글={options.get('allow_comment', True)}, 검색={options.get('allow_search', True)}, 공개={options.get('public', True)}")
@@ -1674,43 +1808,88 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
         return {"ok": False, "url": "", "msg": str(e)[:60]}
 
 
-def _set_post_options(driver, options, _log):
-    """글쓰기 에디터에서 옵션(댓글허용, 검색허용, 전체공개) 설정."""
+def _input_tags(driver, tags, _log):
+    """에디터에서 태그 입력. input.tag_input에 하나씩 입력 + Enter."""
+    if not tags:
+        return
     try:
-        # 설정 영역 펼치기 (접혀있을 수 있음)
-        setting_btns = driver.find_elements(By.CSS_SELECTOR, "[class*='setting'], [class*='option']")
-        for btn in setting_btns:
-            try:
-                if btn.is_displayed() and ("설정" in btn.text or "옵션" in btn.text):
-                    btn.click()
+        tag_input = driver.find_elements(By.CSS_SELECTOR, "input.tag_input")
+        if not tag_input:
+            _log("⚠ 태그 입력 영역 못 찾음")
+            return
+        for i, tag in enumerate(tags[:10]):  # 최대 10개
+            tag_input[0].click()
+            time.sleep(0.1)
+            tag_input[0].clear()
+            tag_input[0].send_keys(tag)
+            time.sleep(0.1)
+            tag_input[0].send_keys(Keys.ENTER)
+            time.sleep(0.1)
+        _log(f"태그 {min(len(tags), 10)}개 입력 완료")
+    except Exception as e:
+        _log(f"태그 입력 실패: {str(e)[:40]}")
+
+
+def _set_post_options(driver, options, _log):
+    """
+    글쓰기 에디터에서 옵션 설정.
+    1. button.btn_open_set 클릭 (공개설정 열기)
+    2. 전체공개 / 멤버공개 라디오 선택
+    3. 멤버공개일 때 검색허용 체크박스
+    4. 댓글허용 체크박스
+    """
+    want_public = options.get("public", True)
+    want_search = options.get("allow_search", True)
+    want_comment = options.get("allow_comment", True)
+
+    try:
+        # 1. 공개설정 버튼 클릭
+        open_btn = driver.find_elements(By.CSS_SELECTOR, "button.btn_open_set")
+        if open_btn:
+            open_btn[0].click()
+            time.sleep(0.3)
+            _log("공개설정 패널 열기")
+
+        # 2. 전체공개 / 멤버공개 라디오
+        if want_public:
+            radio = driver.find_elements(By.CSS_SELECTOR, "input#all[name='public']")
+            if radio and not radio[0].is_selected():
+                driver.find_element(By.CSS_SELECTOR, "label[for='all']").click()
+                time.sleep(0.2)
+            _log("전체공개 선택")
+        else:
+            radio = driver.find_elements(By.CSS_SELECTOR, "input#member[name='public']")
+            if radio and not radio[0].is_selected():
+                driver.find_element(By.CSS_SELECTOR, "label[for='member']").click()
+                time.sleep(0.2)
+            _log("멤버공개 선택")
+
+            # 3. 검색허용 체크박스 (멤버공개일 때만)
+            search_cb = driver.find_elements(By.CSS_SELECTOR, "input#permit")
+            if search_cb:
+                is_checked = search_cb[0].is_selected()
+                if want_search and not is_checked:
+                    driver.find_element(By.CSS_SELECTOR, "label[for='permit']").click()
                     time.sleep(0.2)
-                    break
-            except:
-                continue
+                    _log("검색허용 체크")
+                elif not want_search and is_checked:
+                    driver.find_element(By.CSS_SELECTOR, "label[for='permit']").click()
+                    time.sleep(0.2)
+                    _log("검색허용 해제")
 
-        checkboxes = driver.find_elements(By.CSS_SELECTOR, "label, input[type='checkbox']")
-        for cb in checkboxes:
-            try:
-                txt = cb.text.strip() if cb.tag_name == "label" else (cb.get_attribute("title") or "")
-                is_checked = cb.is_selected() if cb.tag_name == "input" else ("checked" in (cb.get_attribute("class") or ""))
+        # 4. 댓글허용 체크박스
+        comment_cb = driver.find_elements(By.CSS_SELECTOR, "input#coment")
+        if comment_cb:
+            is_checked = comment_cb[0].is_selected()
+            if want_comment and not is_checked:
+                driver.find_element(By.CSS_SELECTOR, "label[for='coment']").click()
+                time.sleep(0.2)
+                _log("댓글허용 체크")
+            elif not want_comment and is_checked:
+                driver.find_element(By.CSS_SELECTOR, "label[for='coment']").click()
+                time.sleep(0.2)
+                _log("댓글허용 해제")
 
-                if "댓글" in txt:
-                    want = options.get("allow_comment", True)
-                    if want != is_checked:
-                        cb.click()
-                        _log(f"댓글허용: {want}")
-                elif "검색" in txt:
-                    want = options.get("allow_search", True)
-                    if want != is_checked:
-                        cb.click()
-                        _log(f"검색허용: {want}")
-                elif "전체" in txt and "공개" in txt:
-                    want = options.get("public", True)
-                    if want != is_checked:
-                        cb.click()
-                        _log(f"전체공개: {want}")
-            except:
-                continue
     except Exception as e:
         _log(f"옵션 설정 실패: {str(e)[:40]}")
 
@@ -1830,11 +2009,11 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
             _log(f"이미지 처리 시작 (파트 {len(ms.get('body_parts', []))}개)")
             processed = prepare_images_for_upload(ms.get("body_parts", []), delete_after=delete_images, log_fn=_log)
             _log(f"이미지 처리 완료 → 에디터 작성 시작")
-            result = write_post(driver, cafe_url, menu_id, ms.get("title", ""), processed, post_options, _log)
+            result = write_post(driver, cafe_url, menu_id, ms.get("title", ""), processed, post_options, ms.get("tags", []), _log)
 
             if result.get("ok"):
                 written += 1
-                result_rows.append({**row_base, "url": result["url"], "deleted": False})
+                result_rows.append({**row_base, "cafe_url": cafe_url, "menu_id": menu_id, "url": result["url"], "deleted": "미확인", "manuscript": ms['name'], "status": "성공", "error": ""})
                 _log(f"✅ 글쓰기 {written}/{post_count} 완료 — URL: {result['url'][:60]}")
                 _cleanup_temp_images(processed)
                 delay = random.randint(delay_lo, delay_hi)
@@ -1843,6 +2022,7 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
             else:
                 _cleanup_temp_images(processed)
                 _log(f"❌ 글쓰기 실패: {result.get('msg', '')}")
+                result_rows.append({**row_base, "cafe_url": cafe_url, "menu_id": menu_id, "url": "", "deleted": "", "manuscript": ms['name'], "status": "실패", "error": result.get('msg', '')})
 
         if write_mode == "글쓰기":
             _log(f"=== 카페 작업 완료: {written}/{post_count}개 작성 ===")
@@ -1892,20 +2072,22 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
                     _log(f"원고 선택: [{ms['name']}] (랜덤)")
                     processed = prepare_images_for_upload(ms.get("body_parts", []), delete_after=delete_images, log_fn=_log)
                     reply_title = ms.get("title", "")
+                    reply_tags = ms.get("tags", [])
                 else:
                     reply_title = ""
+                    reply_tags = []
                     processed = [random.choice(contents)]
 
                 _log(f"답글 작성 시도: [{article['title'][:30]}] article_id={article['article_id']} 등급={article.get('author_grade', '') or '탈퇴회원'} 닉={article.get('author_nick', '')}")
-                result = write_reply(driver, cafe_url, article["article_id"], reply_title, processed, post_options, _log)
+                result = write_reply(driver, cafe_url, article["article_id"], reply_title, processed, post_options, reply_tags, _log)
 
                 if result.get("ok"):
                     reply_written += 1
                     written += 1
-                    result_rows.append({**row_base, "url": result["url"], "deleted": False})
+                    ms_name = ms['name'] if manuscripts else ""
+                    result_rows.append({**row_base, "cafe_url": cafe_url, "menu_id": menu_id, "url": result["url"], "deleted": "미확인", "manuscript": ms_name, "status": "성공", "error": ""})
                     _log(f"✅ 답글 {reply_written}/{reply_target} 완료 — URL: {result['url'][:60]}")
 
-                    # 임시 이미지 정리
                     _cleanup_temp_images(processed)
 
                     delay = random.randint(delay_lo, delay_hi)
@@ -1914,6 +2096,12 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
                 else:
                     _log(f"❌ 답글 작성 실패: article_id={article['article_id']}")
                     _cleanup_temp_images(processed)
+                    ms_name = ms['name'] if manuscripts else ""
+                    result_rows.append({**row_base, "cafe_url": cafe_url, "menu_id": menu_id, "url": "", "deleted": "", "manuscript": ms_name, "status": "실패", "error": result.get('error', '') or "작성실패"})
+                    # 활동정지면 즉시 종료
+                    if result.get("error") == "suspended":
+                        _log("활동정지 감지 — 카페 작업 중단")
+                        return {"ok": False, "msg": "활동정지", "written": written, "result_rows": result_rows, "error": "suspended"}
 
             if filtered_count > 0:
                 _log(f"페이지 {page}: 등급 필터로 {filtered_count}개 스킵")

@@ -437,9 +437,34 @@ class LoginWorkerThread(QThread):
         self.drivers = []
         self.results = []
         self._stop_flag = False
+        self._pause_flag = False
+        self.work_stats = {"reply_ok": 0, "reply_fail": 0, "write_ok": 0, "write_fail": 0, "suspended": 0, "not_member": 0}
 
     def stop(self):
         self._stop_flag = True
+        self._pause_flag = False  # 일시정지 상태에서 중지 누르면 풀어줘야 함
+
+    def pause(self):
+        self._pause_flag = True
+
+    def resume(self):
+        self._pause_flag = False
+
+    def _wait_if_paused(self):
+        """일시정지 상태면 풀릴 때까지 대기."""
+        import time as _time
+        while self._pause_flag and not self._stop_flag:
+            _time.sleep(0.5)
+
+    def cleanup_drivers(self):
+        """모든 크롬 드라이버 종료."""
+        for item in self.drivers:
+            try:
+                drv = item[2] if isinstance(item, tuple) else item
+                drv.quit()
+            except:
+                pass
+        self.drivers = []
 
     def run(self):
         import concurrent.futures
@@ -460,6 +485,7 @@ class LoginWorkerThread(QThread):
         for i in range(count):
             if self._stop_flag:
                 break
+            self._wait_if_paused()
 
             acc = self.accounts[i]
             proxy = self.proxies[i]
@@ -520,6 +546,7 @@ class LoginWorkerThread(QThread):
                 for t_idx, task in enumerate(tasks):
                     if self._stop_flag:
                         break
+                    self._wait_if_paused()
 
                     cafe_url = task.get("cafe_url", "")
                     if not cafe_url:
@@ -561,10 +588,28 @@ class LoginWorkerThread(QThread):
                             work_result = func.do_cafe_work(drv, acc_for_task, cafe_grades, self.settings, log_fn)
                             self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {work_result['msg']}")
 
+                            # 활동정지 → 상태 표시 + 구글시트 기록 + 창 종료
+                            if work_result.get("error") == "suspended":
+                                self.worker_update.emit(worker_idx, f"활동정지: {cafe_short}")
+                                self.work_stats["suspended"] += 1
+                                from datetime import datetime as _dt
+                                func.append_to_gsheet_with_color([[
+                                    grp.get("id", ""), grp.get("pw", ""), grp.get("name", ""),
+                                    grp.get("birth", ""), grp.get("gender", ""),
+                                    cafe_url, task.get("menu_id", ""), "", "", "",
+                                    _dt.now().strftime("%Y-%m-%d %H:%M:%S"), "실패", "활동정지"
+                                ]], sheet_name="결과값", log_fn=log_fn)
+                                try:
+                                    drv.quit()
+                                except:
+                                    pass
+                                return
+
                             # 결과시트 기록 (작성된 글 1개당 1행)
                             rows = work_result.get("result_rows", [])
                             if rows:
                                 self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 결과시트 기록: {len(rows)}행")
+                                from datetime import datetime as _dt
                                 sheet_rows = []
                                 for r in rows:
                                     sheet_rows.append([
@@ -573,15 +618,41 @@ class LoginWorkerThread(QThread):
                                         r.get("name", ""),
                                         r.get("birth", ""),
                                         r.get("gender", ""),
+                                        r.get("cafe_url", ""),
+                                        r.get("menu_id", ""),
                                         r.get("url", ""),
-                                        "N" if not r.get("deleted") else "Y",
+                                        r.get("deleted", "미확인"),
+                                        r.get("manuscript", ""),
+                                        _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        r.get("status", ""),
+                                        r.get("error", ""),
                                     ])
-                                func.append_to_gsheet(sheet_rows, sheet_name="결과", log_fn=log_fn)
+                                func.append_to_gsheet_with_color(sheet_rows, sheet_name="결과값", log_fn=log_fn)
+                                # 작업 카운터 업데이트
+                                for r in rows:
+                                    if r.get("status") == "성공":
+                                        self.work_stats["reply_ok"] += 1
+                                    else:
+                                        self.work_stats["reply_fail"] += 1
+                                self.worker_update.emit(worker_idx, f"완료: {cafe_short}")
                             else:
                                 self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 작성된 글 없음")
                         elif cafe_result.get("need_join"):
-                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 미가입 (자동가입 비활성화)")
+                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 미가입 → 크롬 종료")
                             self.worker_update.emit(worker_idx, f"미가입: {cafe_short}")
+                            self.work_stats["not_member"] += 1
+                            from datetime import datetime as _dt
+                            func.append_to_gsheet_with_color([[
+                                grp.get("id", ""), grp.get("pw", ""), grp.get("name", ""),
+                                grp.get("birth", ""), grp.get("gender", ""),
+                                cafe_url, task.get("menu_id", ""), "", "", "",
+                                _dt.now().strftime("%Y-%m-%d %H:%M:%S"), "실패", "미가입"
+                            ]], sheet_name="결과값", log_fn=log_fn)
+                            try:
+                                drv.quit()
+                            except:
+                                pass
+                            return  # 이 워커 전체 종료
                         else:
                             self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {cafe_result['msg']}")
                             self.worker_update.emit(worker_idx, f"실패: {cafe_short}")
@@ -596,6 +667,12 @@ class LoginWorkerThread(QThread):
                 concurrent.futures.wait(futures)
 
             self.log_signal.emit("=== 카페 접속 완료 ===")
+
+        # 중지 시 모든 크롬 드라이버 종료
+        if self._stop_flag:
+            self.log_signal.emit("중지됨 — 크롬 드라이버 종료 중...")
+            self.cleanup_drivers()
+            self.log_signal.emit("크롬 드라이버 전부 종료 완료")
 
         self.finished_signal.emit(self.results)
 
@@ -727,6 +804,10 @@ class CafeWriterTab(QWidget):
         self.chk_public.setChecked(True)
         wg.addWidget(self.chk_public, 3, 2)
 
+        # 전체공개 체크 시 검색허용 강제 체크+비활성화
+        self.chk_public.toggled.connect(self._on_public_toggled)
+        self._on_public_toggled(True)  # 초기 상태 반영
+
         self.chk_delete_images = QCheckBox("작성 후 원본 사진 삭제")
         self.chk_delete_images.setChecked(False)
         wg.addWidget(self.chk_delete_images, 4, 0, 1, 3)
@@ -788,6 +869,7 @@ class CafeWriterTab(QWidget):
         self.btn_pause = QPushButton("⏸  일시정지")
         self.btn_pause.setEnabled(False)
         self.btn_pause.setMinimumHeight(38)
+        self.btn_pause.clicked.connect(self._on_pause)
         ctrl_layout.addWidget(self.btn_pause)
 
         self.btn_stop = QPushButton("⏹  중지")
@@ -817,11 +899,15 @@ class CafeWriterTab(QWidget):
         worker_layout.addWidget(self.worker_table)
 
         # 요약
-        summary_layout = QHBoxLayout()
-        self.lbl_summary = QLabel("성공 0 | 생년월일 0 | 핸드폰 0 | 영구정지 0 | 캡차 0 | 보안인증 0 | 실패 0 / 총 0개")
+        summary_layout = QVBoxLayout()
+        self.lbl_summary = QLabel("로그인: 성공 0 | 생년월일 0 | 핸드폰 0 | 영구정지 0 | 캡차 0 | 보안인증 0 | 실패 0 / 총 0개")
         self.lbl_summary.setFont(QFont("Malgun Gothic", 11, QFont.Weight.Bold))
         self.lbl_summary.setStyleSheet("color: #303050;")
         summary_layout.addWidget(self.lbl_summary)
+        self.lbl_work_summary = QLabel("작업: 답글성공 0 | 답글실패 0 | 글쓰기성공 0 | 글쓰기실패 0 | 활동정지 0 | 미가입 0")
+        self.lbl_work_summary.setFont(QFont("Malgun Gothic", 11, QFont.Weight.Bold))
+        self.lbl_work_summary.setStyleSheet("color: #303050;")
+        summary_layout.addWidget(self.lbl_work_summary)
         summary_layout.addStretch()
         worker_layout.addLayout(summary_layout)
 
@@ -865,6 +951,14 @@ class CafeWriterTab(QWidget):
         self._log("계정 파일과 프록시를 설정한 후 시작하세요.")
 
     # ── 유틸 ──
+    def _on_public_toggled(self, checked):
+        """전체공개 체크 시 검색허용 강제 체크+비활성화."""
+        if checked:
+            self.chk_allow_search.setChecked(True)
+            self.chk_allow_search.setEnabled(False)
+        else:
+            self.chk_allow_search.setEnabled(True)
+
     def _browse_file(self, target, filt="모든 파일 (*.*)"):
         path, _ = QFileDialog.getOpenFileName(self, "파일 선택", "", filt)
         if path:
@@ -996,9 +1090,8 @@ class CafeWriterTab(QWidget):
 
     def _on_finished(self, results):
         self._update_summary(results)
-        total = len(results)
-        ok = len([r for r in results if r["ok"]])
-        self._log(f"=== 결과: {self.lbl_summary.text()} ===")
+        self._log(f"=== {self.lbl_summary.text()} ===")
+        self._log(f"=== {self.lbl_work_summary.text()} ===")
         self.btn_start.setEnabled(True)
         self.btn_pause.setEnabled(False)
         self.btn_stop.setEnabled(False)
@@ -1014,16 +1107,37 @@ class CafeWriterTab(QWidget):
                     ("blocked_birthday", "blocked_phone", "permanent_ban", "captcha", "security")])
         total = len(results)
         self.lbl_summary.setText(
-            f"성공 {ok} | 생년월일 {bday} | 핸드폰 {phone} | 영구정지 {perm} | 캡차 {captcha} | 보안인증 {security} | 실패 {fail} / 총 {total}개"
+            f"로그인: 성공 {ok} | 생년월일 {bday} | 핸드폰 {phone} | 영구정지 {perm} | 캡차 {captcha} | 보안인증 {security} | 실패 {fail} / 총 {total}개"
         )
+        # 작업 결과
+        if hasattr(self, '_worker_thread'):
+            ws = self._worker_thread.work_stats
+            self.lbl_work_summary.setText(
+                f"작업: 답글성공 {ws['reply_ok']} | 답글실패 {ws['reply_fail']} | 글쓰기성공 {ws['write_ok']} | 글쓰기실패 {ws['write_fail']} | 활동정지 {ws['suspended']} | 미가입 {ws['not_member']}"
+            )
 
     def _on_stop(self):
         if hasattr(self, '_worker_thread') and self._worker_thread.isRunning():
             self._worker_thread.stop()
-            self._log("중지 요청됨... 현재 워커 완료 후 중지됩니다.")
+            self._log("중지 요청됨... 워커 종료 후 크롬 드라이버를 닫습니다.")
         self.btn_start.setEnabled(True)
         self.btn_pause.setEnabled(False)
+        self.btn_pause.setText("⏸  일시정지")
         self.btn_stop.setEnabled(False)
+
+    def _on_pause(self):
+        if not hasattr(self, '_worker_thread') or not self._worker_thread.isRunning():
+            return
+        if self._worker_thread._pause_flag:
+            # 재개
+            self._worker_thread.resume()
+            self.btn_pause.setText("⏸  일시정지")
+            self._log("▶ 작업 재개")
+        else:
+            # 일시정지
+            self._worker_thread.pause()
+            self.btn_pause.setText("▶  재개")
+            self._log("⏸ 일시정지됨 — 현재 작업 완료 후 대기")
 
 
 # ─────────────────────────────────────────────
