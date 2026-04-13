@@ -1937,23 +1937,21 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
     delete_images = settings.get("delete_images", False)
     post_options = settings.get("post_options", {})
 
-    # ── 메뉴ID 비어있으면 → 자동가입 트리거 (비활성화 — 추후 활성화) ──
-    # if not menu_id and settings.get("auto_join"):
-    #     _log("메뉴ID 없음 → 카페 가입 여부 확인")
-    #     visit_result = visit_cafe(driver, account, _log)
-    #     if visit_result.get("need_join"):
-    #         _log("미가입 → 자동가입 시도")
-    #         try:
-    #             from cafe_join import join_cafe
-    #             join_result = join_cafe(driver, cafe_url, log_fn=_log)
-    #             if join_result.get("ok"):
-    #                 _log(f"자동가입 성공: {join_result['msg']}")
-    #             else:
-    #                 _log(f"자동가입 실패: {join_result['msg']}")
-    #                 return {"ok": False, "msg": f"자동가입 실패: {join_result['msg']}", "written": 0, "result_rows": []}
-    #         except Exception as e:
-    #             _log(f"자동가입 에러: {str(e)[:60]}")
-    #             return {"ok": False, "msg": f"자동가입 에러: {str(e)[:40]}", "written": 0, "result_rows": []}
+    # ── 카페 미가입 시 자동가입 ──
+    visit_result = visit_cafe(driver, account, _log)
+    if visit_result.get("need_join"):
+        _log("미가입 → 자동가입 시도")
+        try:
+            from cafe_join import join_cafe
+            join_result = join_cafe(driver, cafe_url, log_fn=_log)
+            if join_result.get("ok"):
+                _log(f"자동가입 성공: {join_result['msg']}")
+            else:
+                _log(f"자동가입 실패: {join_result['msg']}")
+                return {"ok": False, "msg": f"자동가입 실패: {join_result['msg']}", "written": 0, "result_rows": [], "error": "join_failed"}
+        except Exception as e:
+            _log(f"자동가입 에러: {str(e)[:60]}")
+            return {"ok": False, "msg": f"자동가입 에러: {str(e)[:40]}", "written": 0, "result_rows": [], "error": "join_failed"}
 
     # ── 메뉴ID 없으면 글쓰기 가능 게시판 자동 탐색 ──
     if not menu_id:

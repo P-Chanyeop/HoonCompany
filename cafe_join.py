@@ -25,6 +25,7 @@ import json
 import time
 import random
 import logging
+import os
 import base64
 from typing import Optional, Callable
 
@@ -61,9 +62,13 @@ def check_membership(driver, cafe_url, log_fn=None):
     """
     _log = log_fn or (lambda msg: logger.info(msg))
     try:
-        driver.get(cafe_url)
-        time.sleep(3)
-        func.dismiss_alert(driver)
+        # 이미 카페 페이지에 있으면 재접속 안 함
+        current = driver.current_url or ""
+        cafe_short = cafe_url.rstrip("/").split("/")[-1]
+        if cafe_short not in current:
+            driver.get(cafe_url)
+            time.sleep(1)
+            func.dismiss_alert(driver)
 
         # clubid 추출
         club_id = _extract_club_id(driver)
@@ -144,7 +149,7 @@ def join_cafe(driver, cafe_url, nickname=None, log_fn=None):
         if not _navigate_to_join_page(driver, cafe_url, club_id, _log):
             return {**result_base, "ok": False, "msg": "가입 페이지 이동 실패", "error": "nav_failed"}
 
-        time.sleep(2)
+        time.sleep(1)
         url, page = func.get_page_safe(driver)
 
         # 비공개 카페 체크
@@ -158,41 +163,90 @@ def join_cafe(driver, cafe_url, nickname=None, log_fn=None):
         # 4) 가입 질문 처리 (있는 경우)
         _handle_join_questions(driver, _log)
 
-        # 5) 캡차 처리
-        _solve_captcha(driver, _log)
+        # 5~7) 캡차 + 약관 + 가입 버튼 (캡차 틀리면 최대 3회 재시도)
+        for captcha_try in range(3):
+            _solve_captcha(driver, _log, max_attempts=1)
+            _accept_terms(driver, _log)
 
-        # 6) 가입 약관 동의
-        _accept_terms(driver, _log)
+            if not _click_join_button(driver, _log):
+                return {**result_base, "ok": False, "msg": "가입 버튼 클릭 실패", "error": "join_failed"}
 
-        # 7) 가입 버튼 클릭
-        if not _click_join_button(driver, _log):
-            return {**result_base, "ok": False, "msg": "가입 버튼 클릭 실패", "error": "join_failed"}
+            time.sleep(1.5)
+            # 팝업 차단 등 alert 처리
+            for _ in range(3):
+                try:
+                    from selenium.webdriver.common.alert import Alert as _Alert
+                    alert = _Alert(driver)
+                    _log(f"alert 감지: {alert.text[:40]}")
+                    alert.accept()
+                    time.sleep(0.5)
+                except:
+                    break
 
-        time.sleep(3)
-        func.dismiss_alert(driver)
+            # iframe 안에서 캡차 에러 체크 (페이지 이동 전)
+            captcha_failed = False
+            try:
+                _switch_to_cafe_iframe(driver)
+                err_label = driver.find_elements(By.CSS_SELECTOR, "label[for='captcha']")
+                if err_label and ("잘못" in err_label[0].text or "자동 가입 방지" in err_label[0].text):
+                    captcha_failed = True
+                driver.switch_to.default_content()
+            except:
+                try:
+                    driver.switch_to.default_content()
+                except:
+                    pass
 
-        # 8) 가입 결과 확인
-        url2, page2 = func.get_page_safe(driver)
+            if captcha_failed:
+                _log(f"캡차 틀림 ({captcha_try+1}/3) — 재시도")
+                try:
+                    _switch_to_cafe_iframe(driver)
+                    refresh_btn = driver.find_elements(By.CSS_SELECTOR, ".join_captcha_info button")
+                    if refresh_btn:
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", refresh_btn[0])
+                        refresh_btn[0].click()
+                        time.sleep(1)
+                    driver.switch_to.default_content()
+                except:
+                    pass
+                continue
 
-        # 성공 판별
-        if "가입을 축하" in page2 or "가입이 완료" in page2 or "가입 완료" in page2:
-            _log("카페 가입 성공!")
-            return {**result_base, "ok": True, "msg": "가입 성공", "error": None}
+            # 페이지 이동 확인
+            post_url = driver.current_url
+            url2, page2 = func.get_page_safe(driver)
 
-        # 가입 승인 대기
-        if "승인" in page2 or "가입 신청" in page2:
-            _log("가입 신청 완료 (승인 대기)")
-            return {**result_base, "ok": True, "msg": "가입 신청 완료 (승인 대기)", "error": None}
+            if "가입을 축하" in page2 or "가입이 완료" in page2 or "가입 완료" in page2:
+                _log("카페 가입 성공!")
+                return {**result_base, "ok": True, "msg": "가입 성공", "error": None}
 
-        # 이미 가입
-        if "이미 가입" in page2 or "이미 회원" in page2:
-            _log("이미 가입된 카페")
-            return {**result_base, "ok": True, "msg": "이미 가입된 카페", "error": "already_member"}
+            if "승인" in page2 or "가입 신청" in page2:
+                _log("가입 신청 완료 (승인 대기)")
+                return {**result_base, "ok": True, "msg": "가입 신청 완료 (승인 대기)", "error": None}
 
-        # 에러 메시지 추출
-        err = _extract_error_message(driver)
-        _log(f"가입 결과 불명: {err or url2[:60]}")
-        return {**result_base, "ok": False, "msg": err or f"가입 결과 불명 ({url2[:50]})", "error": "join_failed"}
+            if "이미 가입" in page2 or "이미 회원" in page2:
+                _log("이미 가입된 카페")
+                return {**result_base, "ok": True, "msg": "이미 가입된 카페", "error": "already_member"}
+
+            cafe_short = cafe_url.rstrip("/").split("/")[-1]
+            if cafe_short in post_url and "join" not in post_url.lower():
+                _log("카페 메인으로 이동 — 가입 성공")
+                return {**result_base, "ok": True, "msg": "가입 성공 (리다이렉트)", "error": None}
+
+            # 결과 불명 → 카페 재접속해서 가입 확인
+            _log("가입 결과 불명 — 카페 재접속하여 가입 확인")
+            driver.get(cafe_url)
+            time.sleep(1)
+            func.dismiss_alert(driver)
+            recheck = check_membership(driver, cafe_url, _log)
+            if recheck.get("is_member"):
+                _log("카페 재확인 — 가입 성공!")
+                return {**result_base, "ok": True, "msg": "가입 성공 (재확인)", "error": None}
+
+            _log(f"가입 결과 불명: {post_url[:60]}")
+            return {**result_base, "ok": False, "msg": f"가입 결과 불명 ({post_url[:50]})", "error": "join_failed"}
+
+        _log("캡차 3회 실패 — 가입 실패")
+        return {**result_base, "ok": False, "msg": "캡차 3회 실패", "error": "captcha"}
 
     except Exception as e:
         _log(f"카페 가입 에러: {str(e)[:60]}")
@@ -294,7 +348,7 @@ def _navigate_to_join_page(driver, cafe_url, club_id, _log):
     # 방법 1: JS joinCafe 호출
     try:
         driver.execute_script("joinCafe();")
-        time.sleep(2)
+        time.sleep(1)
         url, _ = func.get_page_safe(driver)
         if "JoinCafe" in url or "join" in url.lower():
             _log("가입 페이지 이동 (JS)")
@@ -308,7 +362,7 @@ def _navigate_to_join_page(driver, cafe_url, club_id, _log):
             txt = (btn.text or "").strip()
             if "카페 가입" in txt or "가입하기" in txt:
                 btn.click()
-                time.sleep(2)
+                time.sleep(1)
                 _log("가입 페이지 이동 (버튼 클릭)")
                 return True
     except:
@@ -318,7 +372,7 @@ def _navigate_to_join_page(driver, cafe_url, club_id, _log):
     if club_id:
         join_url = f"https://cafe.naver.com/CafeJoin.nhn?clubid={club_id}"
         driver.get(join_url)
-        time.sleep(2)
+        time.sleep(1)
         _log("가입 페이지 이동 (URL 직접)")
         return True
 
@@ -327,7 +381,7 @@ def _navigate_to_join_page(driver, cafe_url, club_id, _log):
     if cafe_name:
         join_url = f"https://cafe.naver.com/{cafe_name}?iframe_url=/CafeJoin.nhn"
         driver.get(join_url)
-        time.sleep(2)
+        time.sleep(1)
         _log("가입 페이지 이동 (카페명 URL)")
         return True
 
@@ -336,24 +390,44 @@ def _navigate_to_join_page(driver, cafe_url, club_id, _log):
 
 
 def _fill_nickname(driver, nickname, _log):
-    """닉네임 입력. nickname이 None이면 스킵 (기본 닉네임 사용)."""
-    if not nickname:
-        return
+    """닉네임 입력. 중복이면 랜덤 숫자 붙여서 재시도."""
     try:
-        # iframe 내부일 수 있으므로 전환 시도
         _switch_to_cafe_iframe(driver)
 
         nick_input = driver.find_elements(By.CSS_SELECTOR,
             "input[name='nickname'], input#nickname, input[placeholder*='별명'], input[placeholder*='닉네임']"
         )
-        if nick_input:
+        if not nick_input:
+            _log("닉네임 입력 영역 없음 — 스킵")
+            return
+
+        import random as _rand
+
+        # 닉네임이 없으면 기본값 생성
+        base_nick = nickname or f"user{_rand.randint(1000, 9999)}"
+
+        for try_i in range(5):
+            current_nick = base_nick if try_i == 0 else f"{base_nick}{_rand.randint(10, 999)}"
             nick_input[0].clear()
-            time.sleep(0.2)
-            pyperclip.copy(nickname)
-            nick_input[0].send_keys(Keys.CONTROL, "a")
-            nick_input[0].send_keys(Keys.CONTROL, "v")
-            _log(f"닉네임 입력: {nickname}")
-            time.sleep(0.3)
+            time.sleep(0.1)
+            nick_input[0].send_keys(current_nick)
+            nick_input[0].send_keys(Keys.TAB)  # 포커스 이동 → 중복 체크 트리거
+            time.sleep(1)
+
+            # 중복 체크 결과 확인
+            err_els = driver.find_elements(By.CSS_SELECTOR, ".error_msg, .nick_error, span.error, p.error")
+            page_text = driver.page_source[:3000]
+            if "이미 사용 중" in page_text or "사용할 수 없는" in page_text:
+                _log(f"닉네임 중복: {current_nick} ({try_i+1}/5)")
+                continue
+            if "사용할 수 있는" in page_text:
+                _log(f"닉네임 사용 가능: {current_nick}")
+                return
+            # 판별 불가면 그냥 진행
+            _log(f"닉네임 입력: {current_nick}")
+            return
+
+        _log("닉네임 5회 시도 실패 — 마지막 값으로 진행")
     except Exception as e:
         _log(f"닉네임 입력 실패: {str(e)[:40]}")
 
@@ -443,7 +517,7 @@ def _handle_join_questions(driver, _log):
 
 
 def _solve_captcha(driver, _log, max_attempts=3):
-    """캡차 이미지를 Gemini 2.5 Pro로 풀기. 최대 max_attempts회 시도."""
+    """캡차 이미지를 다운로드 후 Gemini 2.5 Pro로 풀기. 최대 max_attempts회 시도."""
     try:
         _switch_to_cafe_iframe(driver)
 
@@ -458,13 +532,12 @@ def _solve_captcha(driver, _log, max_attempts=3):
         for attempt in range(1, max_attempts + 1):
             _log(f"캡차 시도 {attempt}/{max_attempts}")
 
-            # 재시도 시 새로고침 버튼 클릭
             if attempt > 1:
                 try:
                     refresh_btn = driver.find_element(By.CSS_SELECTOR, ".join_captcha_info button .join_captcha_refresh")
                     refresh_btn.find_element(By.XPATH, "./ancestor::button").click()
                     _log("  캡차 새로고침...")
-                    time.sleep(2)
+                    time.sleep(1)
                 except:
                     _log("  새로고침 버튼 못 찾음")
 
@@ -474,10 +547,37 @@ def _solve_captcha(driver, _log, max_attempts=3):
                 _log("캡차 이미지 없음 — 스킵")
                 return True
 
-            # 이미지를 base64로 캡처
-            img_b64 = img_el[0].screenshot_as_base64
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", img_el[0])
+            time.sleep(0.3)
 
-            # Gemini 2.5 Pro로 캡차 텍스트 추출
+            # 이미지 src에서 원본 다운로드
+            import tempfile, urllib.request
+            img_src = img_el[0].get_attribute("src") or ""
+            tmp_path = None
+            img_data = None
+
+            if img_src.startswith("http"):
+                try:
+                    fd, tmp_path = tempfile.mkstemp(suffix=".png")
+                    os.close(fd)
+                    urllib.request.urlretrieve(img_src, tmp_path)
+                    # 400x150으로 업스케일링
+                    from PIL import Image as _PILImage
+                    pil_img = _PILImage.open(tmp_path)
+                    pil_img = pil_img.resize((400, 150), _PILImage.LANCZOS)
+                    pil_img.save(tmp_path, "PNG")
+                    pil_img.close()
+                    with open(tmp_path, "rb") as f:
+                        img_data = f.read()
+                    _log(f"  캡차 이미지 다운로드+업스케일(400x150): {len(img_data)}bytes")
+                except:
+                    img_data = None
+
+            # 다운로드 실패 시 스크린샷 폴백
+            if not img_data:
+                img_b64 = img_el[0].screenshot_as_base64
+                img_data = base64.b64decode(img_b64)
+
             prompt = (
                 "이 이미지는 네이버 캡차입니다. 이미지에 보이는 문자를 정확히 읽어주세요.\n"
                 "규칙:\n"
@@ -487,18 +587,26 @@ def _solve_captcha(driver, _log, max_attempts=3):
             )
             resp = model.generate_content([
                 prompt,
-                {"mime_type": "image/png", "data": base64.b64decode(img_b64) if isinstance(img_b64, str) else img_b64}
+                {"mime_type": "image/png", "data": img_data}
             ])
             captcha_text = resp.text.strip()
             _log(f"  캡차 인식: {captcha_text}")
 
+            # 임시 파일 삭제
+            if tmp_path and os.path.isfile(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except:
+                    pass
+
             # 캡차 입력
             captcha_input = driver.find_element(By.CSS_SELECTOR, "#captcha")
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", captcha_input)
             captcha_input.clear()
-            time.sleep(0.2)
+            time.sleep(0.1)
             captcha_input.send_keys(captcha_text)
             _log(f"  캡차 입력 완료")
-            time.sleep(0.3)
+            time.sleep(0.2)
             return True
 
         return False
@@ -517,9 +625,10 @@ def _accept_terms(driver, _log):
         )
         for cb in checkboxes:
             try:
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", cb)
                 if not cb.is_selected():
                     cb.click()
-                    time.sleep(0.2)
+                    time.sleep(0.1)
             except:
                 try:
                     driver.execute_script("arguments[0].checked=true;arguments[0].dispatchEvent(new Event('change'));", cb)
@@ -536,7 +645,6 @@ def _click_join_button(driver, _log):
     try:
         _switch_to_cafe_iframe(driver)
 
-        # 가입 버튼 탐색 (우선순위 순)
         selectors = [
             "a.btn_join, button.btn_join",
             "a.btn_submit, button.btn_submit",
@@ -546,15 +654,16 @@ def _click_join_button(driver, _log):
             btns = driver.find_elements(By.CSS_SELECTOR, sel)
             for btn in btns:
                 txt = (btn.text or btn.get_attribute("value") or "").strip()
-                if any(kw in txt for kw in ["가입", "완료", "신청", "확인"]):
+                if any(kw in txt for kw in ["가입", "완료", "신청", "확인", "동의"]):
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
                     btn.click()
                     _log(f"가입 버튼 클릭: {txt}")
                     return True
 
-        # 폴백: 텍스트로 탐색
         for btn in driver.find_elements(By.CSS_SELECTOR, "a, button, input[type='submit'], input[type='button']"):
             txt = (btn.text or btn.get_attribute("value") or "").strip()
-            if any(kw in txt for kw in ["카페 가입", "가입하기", "가입 완료", "가입 신청"]):
+            if any(kw in txt for kw in ["카페 가입", "가입하기", "가입 완료", "가입 신청", "동의 후 가입"]):
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
                 btn.click()
                 _log(f"가입 버튼 클릭: {txt}")
                 return True

@@ -7,3 +7,11 @@ __pycache__/
 changed_passwords.txt
 credentials.json
 token.json
+build/
+dist/
+*.spec
+
+build/
+dist/
+*.spec
+*.exe

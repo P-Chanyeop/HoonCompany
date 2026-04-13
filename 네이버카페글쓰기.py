@@ -18,11 +18,12 @@ from PyQt6.QtWidgets import (
     QComboBox, QSpinBox, QCheckBox, QGroupBox, QSlider,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QSplitter, QFrame, QFileDialog, QMessageBox,
-    QProgressBar, QAbstractItemView, QScrollArea
+    QProgressBar, QAbstractItemView, QScrollArea,
+    QDialog
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QColor
-
+import os
 import func
 
 
@@ -638,21 +639,46 @@ class LoginWorkerThread(QThread):
                             else:
                                 self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 작성된 글 없음")
                         elif cafe_result.get("need_join"):
-                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 미가입 → 크롬 종료")
-                            self.worker_update.emit(worker_idx, f"미가입: {cafe_short}")
-                            self.work_stats["not_member"] += 1
-                            from datetime import datetime as _dt
-                            func.append_to_gsheet_with_color([[
-                                grp.get("id", ""), grp.get("pw", ""), grp.get("name", ""),
-                                grp.get("birth", ""), grp.get("gender", ""),
-                                cafe_url, task.get("menu_id", ""), "", "", "",
-                                _dt.now().strftime("%Y-%m-%d %H:%M:%S"), "실패", "미가입"
-                            ]], sheet_name="결과값", log_fn=log_fn)
-                            try:
-                                drv.quit()
-                            except:
-                                pass
-                            return  # 이 워커 전체 종료
+                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 미가입 → 자동가입 시도")
+                            self.worker_update.emit(worker_idx, f"자동가입: {cafe_short}")
+
+                            work_result = func.do_cafe_work(drv, acc_for_task, cafe_grades, self.settings, log_fn)
+                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {work_result['msg']}")
+
+                            if work_result.get("error") == "join_failed":
+                                self.worker_update.emit(worker_idx, f"가입실패: {cafe_short}")
+                                self.work_stats["not_member"] += 1
+                                from datetime import datetime as _dt
+                                func.append_to_gsheet_with_color([[
+                                    grp.get("id", ""), grp.get("pw", ""), grp.get("name", ""),
+                                    grp.get("birth", ""), grp.get("gender", ""),
+                                    cafe_url, task.get("menu_id", ""), "", "", "",
+                                    _dt.now().strftime("%Y-%m-%d %H:%M:%S"), "실패", work_result.get("msg", "가입실패")
+                                ]], sheet_name="결과값", log_fn=log_fn)
+                            else:
+                                # 가입 성공 후 작업 결과 처리
+                                rows = work_result.get("result_rows", [])
+                                if rows:
+                                    self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 결과시트 기록: {len(rows)}행")
+                                    from datetime import datetime as _dt
+                                    sheet_rows = []
+                                    for r in rows:
+                                        sheet_rows.append([
+                                            r.get("id", ""), r.get("pw", ""), r.get("name", ""),
+                                            r.get("birth", ""), r.get("gender", ""),
+                                            r.get("cafe_url", ""), r.get("menu_id", ""),
+                                            r.get("url", ""), r.get("deleted", "미확인"),
+                                            r.get("manuscript", ""),
+                                            _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                            r.get("status", ""), r.get("error", ""),
+                                        ])
+                                    func.append_to_gsheet_with_color(sheet_rows, sheet_name="결과값", log_fn=log_fn)
+                                    for r in rows:
+                                        if r.get("status") == "성공":
+                                            self.work_stats["reply_ok"] += 1
+                                        else:
+                                            self.work_stats["reply_fail"] += 1
+                                    self.worker_update.emit(worker_idx, f"완료: {cafe_short}")
                         else:
                             self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {cafe_result['msg']}")
                             self.worker_update.emit(worker_idx, f"실패: {cafe_short}")
@@ -987,6 +1013,7 @@ class CafeWriterTab(QWidget):
         # 구글시트에서 계정 로드
         self._log("구글시트에서 계정 로드 중...")
         accounts = func.load_accounts_from_gsheet()
+        # accounts = [a for a in accounts if a["id"] == "ssnafatemm64654"]  # 테스트용 필터
         if not accounts:
             QMessageBox.warning(self, "알림", "구글시트에서 계정을 불러올 수 없습니다.")
             return
@@ -1213,6 +1240,12 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1200, 700)
         self.resize(1400, 900)
 
+        # 윈도우 아이콘 설정
+        from PyQt6.QtGui import QIcon
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "softcat2.ico")
+        if os.path.isfile(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+
         central = QWidget()
         self.setCentralWidget(central)
         ml = QVBoxLayout(central)
@@ -1271,10 +1304,153 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("준비됨  |  SOFTCAT © 2026  |  HOON COMPANY 귀하")
 
 
+# ─────────────────────────────────────────────
+# API 키 인증 창
+# ─────────────────────────────────────────────
+class ApiKeyAuthWindow(QDialog):
+    PRODUCT_ID = 12
+    ADMIN_KEY = "softcat-admin-2026"
+    API_HOST = "http://13.209.199.124:8080"
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("SOFTCAT 인증")
+        self.setFixedSize(420, 280)
+        self.authenticated = False
+        self.user_info = {}
+
+        # 아이콘
+        from PyQt6.QtGui import QIcon
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "softcat2.ico")
+        if os.path.isfile(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(12)
+
+        title = QLabel("SOFTCAT 네이버 카페 자동화")
+        title.setFont(QFont("Malgun Gothic", 16, QFont.Weight.Bold))
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("color: #4a6cf7;")
+        layout.addWidget(title)
+
+        subtitle = QLabel("API 키를 입력하여 인증해주세요.")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setStyleSheet("color: #606070; font-size: 12px;")
+        layout.addWidget(subtitle)
+
+        layout.addSpacing(10)
+
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setPlaceholderText("API 키 입력")
+        self.api_key_input.setMinimumHeight(36)
+        self.api_key_input.setStyleSheet("font-size: 13px; padding: 6px 10px; border: 1px solid #b0b0c0; border-radius: 4px;")
+        self.api_key_input.returnPressed.connect(self._authenticate)
+        layout.addWidget(self.api_key_input)
+
+        self.btn_auth = QPushButton("인증")
+        self.btn_auth.setMinimumHeight(38)
+        self.btn_auth.setStyleSheet("background-color: #4a6cf7; color: white; font-size: 13px; font-weight: bold; border: none; border-radius: 4px;")
+        self.btn_auth.clicked.connect(self._authenticate)
+        layout.addWidget(self.btn_auth)
+
+        self.lbl_error = QLabel("")
+        self.lbl_error.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_error.setStyleSheet("color: #e53935; font-size: 11px;")
+        self.lbl_error.setVisible(False)
+        layout.addWidget(self.lbl_error)
+
+        self.lbl_info = QLabel("SOFTCAT | HOON COMPANY")
+        self.lbl_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_info.setStyleSheet("color: #a0a0a8; font-size: 10px;")
+        layout.addWidget(self.lbl_info)
+
+        layout.addStretch()
+
+    def _get_mac_address(self):
+        import psutil
+        for name, addrs in psutil.net_if_addrs().items():
+            stats = psutil.net_if_stats().get(name)
+            if stats and stats.isup and name != 'lo':
+                for addr in addrs:
+                    if addr.family == psutil.AF_LINK and addr.address and addr.address != '00:00:00:00:00:00':
+                        return addr.address.replace('-', ':').upper()
+        import uuid
+        mac = uuid.getnode()
+        return ':'.join(f'{(mac >> (8 * i)) & 0xff:02x}' for i in reversed(range(6)))
+
+    def _show_error(self, msg):
+        self.lbl_error.setText(msg)
+        self.lbl_error.setVisible(True)
+
+    def _authenticate(self):
+        import urllib.request
+        import json
+
+        api_key = self.api_key_input.text().strip()
+        if not api_key:
+            self._show_error("API 키를 입력해주세요.")
+            return
+
+        self.btn_auth.setEnabled(False)
+        self.lbl_error.setVisible(False)
+
+        try:
+            # 관리자 키
+            if api_key == self.ADMIN_KEY:
+                self.user_info = {"nickname": "관리자", "api_key": api_key, "remaining_days": 9999}
+                self.authenticated = True
+                self.accept()
+                return
+
+            # 1. API 키 인증
+            auth_url = f"{self.API_HOST}/api/subscription/hash-key-auth/temp?id={self.PRODUCT_ID}&hashKey={api_key}"
+            req = urllib.request.Request(auth_url)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                auth_data = json.loads(resp.read().decode())
+
+            # 2. MAC 주소 검증
+            mac = self._get_mac_address()
+            mac_url = f"{self.API_HOST}/api/subscription/verify-mac/temp?id={self.PRODUCT_ID}&hashKey={api_key}&macAddress={mac}"
+            req2 = urllib.request.Request(mac_url, method="POST")
+            with urllib.request.urlopen(req2, timeout=10) as resp2:
+                mac_data = json.loads(resp2.read().decode())
+
+            if mac_data.get("result") == "fail":
+                self._show_error("MAC 주소 인증에 실패하였습니다.")
+                return
+
+            # 3. 사용자 정보
+            nickname = auth_data.get("name", "사용자")
+            remaining = auth_data.get("remainingDays", 0)
+            self.user_info = {"nickname": nickname, "api_key": api_key, "remaining_days": remaining}
+            self.authenticated = True
+            self.accept()
+
+        except urllib.error.HTTPError:
+            self._show_error("API 인증에 실패하였습니다.")
+        except Exception as e:
+            self._show_error(f"연결 오류: {str(e)[:50]}")
+        finally:
+            self.btn_auth.setEnabled(True)
+
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLE_SHEET)
     app.setFont(QFont("Malgun Gothic", 10))
+
+    # 인증 창
+    auth = ApiKeyAuthWindow()
+    if auth.exec() != QDialog.DialogCode.Accepted or not auth.authenticated:
+        sys.exit(0)
+
+    # 인증 성공 → 메인 윈도우
     window = MainWindow()
+    info = auth.user_info
+    window.statusBar().showMessage(
+        f"준비됨  |  {info.get('nickname', '')}님  |  잔여 {info.get('remaining_days', 0)}일  |  SOFTCAT © 2026  |  HOON COMPANY"
+    )
     window.show()
     sys.exit(app.exec())
