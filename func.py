@@ -59,6 +59,11 @@ def get_gemini_key():
     return cfg.get("gemini", "api_key", fallback="").strip()
 
 
+def get_2captcha_key():
+    cfg = load_config()
+    return cfg.get("2captcha", "api_key", fallback="").strip()
+
+
 # ═══════════════════════════════════════════════
 # 구글시트에서 계정 로드
 # ═══════════════════════════════════════════════
@@ -320,7 +325,7 @@ def load_manuscripts(root_folder):
             if ms:
                 manuscripts.append(ms)
 
-    random.shuffle(manuscripts)
+    manuscripts.sort(key=lambda m: m["name"])
     return manuscripts
 
 
@@ -643,7 +648,7 @@ def get_manuscript_display_list(root_folder):
                 })
 
     _scan(root_folder)
-    random.shuffle(result)
+    result.sort(key=lambda x: x["name"])
     return result
 
 
@@ -1941,21 +1946,8 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
     delete_images = settings.get("delete_images", False)
     post_options = settings.get("post_options", {})
 
-    # ── 카페 미가입 시 자동가입 ──
-    visit_result = visit_cafe(driver, account, _log)
-    if visit_result.get("need_join"):
-        _log("미가입 → 자동가입 시도")
-        try:
-            from cafe_join import join_cafe
-            join_result = join_cafe(driver, cafe_url, log_fn=_log)
-            if join_result.get("ok"):
-                _log(f"자동가입 성공: {join_result['msg']}")
-            else:
-                _log(f"자동가입 실패: {join_result['msg']}")
-                return {"ok": False, "msg": f"자동가입 실패: {join_result['msg']}", "written": 0, "result_rows": [], "error": "join_failed"}
-        except Exception as e:
-            _log(f"자동가입 에러: {str(e)[:60]}")
-            return {"ok": False, "msg": f"자동가입 에러: {str(e)[:40]}", "written": 0, "result_rows": [], "error": "join_failed"}
+    # ── 카페 미가입 시 자동가입 (워커 스레드에서 이미 판별 후 호출됨) ──
+    # visit_cafe는 워커 스레드에서 이미 호출했으므로 여기서는 스킵
 
     # ── 메뉴ID 없으면 글쓰기 가능 게시판 자동 탐색 ──
     if not menu_id:
@@ -1969,7 +1961,7 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
 
     written = 0
     result_rows = []
-    manuscripts = settings.get("manuscripts", [])
+    manuscripts = settings.get("ms_assignments", {}).get(account.get("id", ""), settings.get("manuscripts", []))
     contents = settings.get("contents", [])
     if not manuscripts and not contents:
         _log("원고 없음")
@@ -2002,9 +1994,9 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
                 _log(f"목표 달성 ({written}/{post_count}) — 글쓰기 종료")
                 break
 
-            ms = random.choice(manuscripts) if manuscripts else None
+            ms = manuscripts[written] if written < len(manuscripts) else None
             if not ms:
-                _log("원고 없음 — 글쓰기 중단")
+                _log("배정된 원고 소진 — 글쓰기 중단")
                 break
 
             _log(f"글쓰기 {i+1}/{post_count}: 원고=[{ms['name']}] 제목=[{ms.get('title', '')[:30]}]")
@@ -2068,17 +2060,20 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
                     filtered_count += 1
                     continue
 
-                # 원고 랜덤 추출
-                if manuscripts:
-                    ms = random.choice(manuscripts)
-                    _log(f"원고 선택: [{ms['name']}] (랜덤)")
+                # 원고 순차 배정
+                if manuscripts and reply_written < len(manuscripts):
+                    ms = manuscripts[reply_written]
+                    _log(f"원고 배정: [{ms['name']}] ({reply_written+1}/{len(manuscripts)})")
                     processed = prepare_images_for_upload(ms.get("body_parts", []), delete_after=delete_images, log_fn=_log)
                     reply_title = ms.get("title", "")
                     reply_tags = ms.get("tags", [])
+                elif manuscripts:
+                    _log("배정된 원고 소진 — 답글 중단")
+                    break
                 else:
                     reply_title = ""
                     reply_tags = []
-                    processed = [random.choice(contents)]
+                    processed = [contents[reply_written % len(contents)] if contents else ""]
 
                 _log(f"답글 작성 시도: [{article['title'][:30]}] article_id={article['article_id']} 등급={article.get('author_grade', '') or '탈퇴회원'} 닉={article.get('author_nick', '')}")
                 result = write_reply(driver, cafe_url, article["article_id"], reply_title, processed, post_options, reply_tags, _log)

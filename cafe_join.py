@@ -163,9 +163,23 @@ def join_cafe(driver, cafe_url, nickname=None, log_fn=None):
         # 4) 가입 질문 처리 (있는 경우)
         _handle_join_questions(driver, _log)
 
-        # 5~7) 캡차 + 약관 + 가입 버튼 (캡차 틀리면 최대 3회 재시도)
+        # 5~7) 캡차 + 약관 + 가입 버튼 (최대 3회 재시도)
         for captcha_try in range(3):
-            _solve_captcha(driver, _log, max_attempts=1)
+            captcha_ok = _solve_captcha(driver, _log, max_attempts=1)
+            if not captcha_ok:
+                _log(f"캡차 인식 실패 ({captcha_try+1}/3)")
+                # 새로고침
+                try:
+                    _switch_to_cafe_iframe(driver)
+                    refresh_btn = driver.find_elements(By.CSS_SELECTOR, "button:has(.join_captcha_refresh), .join_captcha_info button")
+                    if refresh_btn:
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", refresh_btn[0])
+                        refresh_btn[0].click()
+                        time.sleep(1)
+                    driver.switch_to.default_content()
+                except:
+                    pass
+                continue
             _accept_terms(driver, _log)
 
             if not _click_join_button(driver, _log):
@@ -529,31 +543,24 @@ def _handle_join_questions(driver, _log):
 
 
 def _solve_captcha(driver, _log, max_attempts=3):
-    """캡차 이미지를 다운로드 후 Gemini 2.5 Pro로 풀기. 최대 max_attempts회 시도."""
+    """2Captcha API로 캡차 풀기. 실패 시 Gemini 폴백."""
     try:
         _switch_to_cafe_iframe(driver)
-
-        gemini_key = func.get_gemini_key()
-        if not gemini_key:
-            _log("Gemini API 키 없음 — 캡차 풀기 불가")
-            return False
-
-        genai.configure(api_key=gemini_key)
-        model = genai.GenerativeModel("gemini-2.5-pro")
 
         for attempt in range(1, max_attempts + 1):
             _log(f"캡차 시도 {attempt}/{max_attempts}")
 
             if attempt > 1:
                 try:
-                    refresh_btn = driver.find_element(By.CSS_SELECTOR, ".join_captcha_info button .join_captcha_refresh")
-                    refresh_btn.find_element(By.XPATH, "./ancestor::button").click()
-                    _log("  캡차 새로고침...")
-                    time.sleep(1)
+                    refresh_btn = driver.find_elements(By.CSS_SELECTOR, "button:has(.join_captcha_refresh), .join_captcha_info button")
+                    if refresh_btn:
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", refresh_btn[0])
+                        refresh_btn[0].click()
+                        _log("  캡차 새로고침...")
+                        time.sleep(1)
                 except:
                     _log("  새로고침 버튼 못 찾음")
 
-            # 캡차 이미지 찾기
             img_el = driver.find_elements(By.CSS_SELECTOR, ".join_captcha_area img")
             if not img_el:
                 _log("캡차 이미지 없음 — 스킵")
@@ -562,7 +569,7 @@ def _solve_captcha(driver, _log, max_attempts=3):
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", img_el[0])
             time.sleep(0.3)
 
-            # 이미지 src에서 원본 다운로드
+            # 이미지 다운로드
             import tempfile, urllib.request
             img_src = img_el[0].get_attribute("src") or ""
             tmp_path = None
@@ -573,36 +580,18 @@ def _solve_captcha(driver, _log, max_attempts=3):
                     fd, tmp_path = tempfile.mkstemp(suffix=".png")
                     os.close(fd)
                     urllib.request.urlretrieve(img_src, tmp_path)
-                    # 400x150으로 업스케일링
-                    from PIL import Image as _PILImage
-                    pil_img = _PILImage.open(tmp_path)
-                    pil_img = pil_img.resize((400, 150), _PILImage.LANCZOS)
-                    pil_img.save(tmp_path, "PNG")
-                    pil_img.close()
                     with open(tmp_path, "rb") as f:
                         img_data = f.read()
-                    _log(f"  캡차 이미지 다운로드+업스케일(400x150): {len(img_data)}bytes")
+                    _log(f"  캡차 이미지 다운로드: {len(img_data)}bytes")
                 except:
                     img_data = None
 
-            # 다운로드 실패 시 스크린샷 폴백
             if not img_data:
                 img_b64 = img_el[0].screenshot_as_base64
                 img_data = base64.b64decode(img_b64)
 
-            prompt = (
-                "이 이미지는 네이버 캡차입니다. 이미지에 보이는 문자를 정확히 읽어주세요.\n"
-                "규칙:\n"
-                "- 배경 노이즈와 줄을 무시하고 실제 글자만 읽으세요\n"
-                "- 대소문자를 정확히 구분하세요\n"
-                "- 글자만 출력하세요 (설명, 따옴표, 공백 없이)"
-            )
-            resp = model.generate_content([
-                prompt,
-                {"mime_type": "image/png", "data": img_data}
-            ])
-            captcha_text = resp.text.strip()
-            _log(f"  캡차 인식: {captcha_text}")
+            # 2Captcha로 풀기
+            captcha_text = _solve_with_2captcha(img_data, _log)
 
             # 임시 파일 삭제
             if tmp_path and os.path.isfile(tmp_path):
@@ -611,13 +600,17 @@ def _solve_captcha(driver, _log, max_attempts=3):
                 except:
                     pass
 
+            if not captcha_text:
+                _log(f"  캡차 인식 실패 ({attempt}/{max_attempts})")
+                continue
+
             # 캡차 입력
             captcha_input = driver.find_element(By.CSS_SELECTOR, "#captcha")
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", captcha_input)
             captcha_input.clear()
             time.sleep(0.1)
             captcha_input.send_keys(captcha_text)
-            _log(f"  캡차 입력 완료")
+            _log(f"  캡차 입력 완료: {captcha_text}")
             time.sleep(0.2)
             return True
 
@@ -626,6 +619,59 @@ def _solve_captcha(driver, _log, max_attempts=3):
     except Exception as e:
         _log(f"캡차 처리 실패: {str(e)[:60]}")
         return False
+
+
+def _solve_with_2captcha(img_data, _log):
+    """2Captcha API로 이미지 캡차 풀기."""
+    import json, urllib.request, urllib.parse
+    api_key = func.get_2captcha_key()
+    if not api_key:
+        _log("  2Captcha API 키 없음 — 스킵")
+        return None
+
+    try:
+        # 1) 캡차 제출
+        img_b64 = base64.b64encode(img_data).decode()
+        payload = urllib.parse.urlencode({
+            "key": api_key,
+            "method": "base64",
+            "body": img_b64,
+            "json": 1,
+        }).encode()
+        req = urllib.request.Request("http://2captcha.com/in.php", data=payload)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode())
+
+        if result.get("status") != 1:
+            _log(f"  2Captcha 제출 실패: {result.get('request', '')}")
+            return None
+
+        task_id = result["request"]
+        _log(f"  2Captcha 제출 완료: task_id={task_id}")
+
+        # 2) 결과 폴링 (최대 60초)
+        for _ in range(12):
+            time.sleep(5)
+            poll_url = f"http://2captcha.com/res.php?key={api_key}&action=get&id={task_id}&json=1"
+            with urllib.request.urlopen(poll_url, timeout=10) as resp2:
+                result2 = json.loads(resp2.read().decode())
+
+            if result2.get("status") == 1:
+                answer = result2["request"]
+                _log(f"  2Captcha 인식: {answer}")
+                return answer
+            elif result2.get("request") == "CAPCHA_NOT_READY":
+                continue
+            else:
+                _log(f"  2Captcha 에러: {result2.get('request', '')}")
+                return None
+
+        _log("  2Captcha 타임아웃")
+        return None
+
+    except Exception as e:
+        _log(f"  2Captcha 실패: {str(e)[:40]}")
+        return None
 
 
 def _accept_terms(driver, _log):

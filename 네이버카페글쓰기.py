@@ -381,6 +381,16 @@ class SettingsTab(QWidget):
         gg.addWidget(self.gemini_model, 1, 1)
         layout.addWidget(gemini_group)
 
+        # ── 2Captcha 설정 ──
+        captcha_group = QGroupBox("2Captcha 설정 (카페 가입 캡차)")
+        cg2 = QGridLayout(captcha_group)
+        cg2.addWidget(QLabel("API 키:"), 0, 0)
+        self.twocaptcha_api_key = QLineEdit()
+        self.twocaptcha_api_key.setPlaceholderText("2Captcha API 키")
+        self.twocaptcha_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        cg2.addWidget(self.twocaptcha_api_key, 0, 1)
+        layout.addWidget(captcha_group)
+
         # ── 하이아이피 설정 ──
         # (삭제됨 — 필요 없음)
 
@@ -411,11 +421,13 @@ class SettingsTab(QWidget):
         self.gs_sa_file.setText(cfg.get("google_sheets", "sa_file", fallback=""))
         self.gs_sheet_id.setText(cfg.get("google_sheets", "sheet_id", fallback=""))
         self.gemini_api_key.setText(cfg.get("gemini", "api_key", fallback=""))
+        self.twocaptcha_api_key.setText(cfg.get("2captcha", "api_key", fallback=""))
         self.proxy_file_edit.setText(cfg.get("paths", "proxy_file", fallback=""))
 
     def _save_config(self):
         cfg = configparser.ConfigParser()
         cfg["gemini"] = {"api_key": self.gemini_api_key.text()}
+        cfg["2captcha"] = {"api_key": self.twocaptcha_api_key.text()}
         cfg["google_sheets"] = {"sa_file": self.gs_sa_file.text(), "sheet_id": self.gs_sheet_id.text()}
         cfg["paths"] = {"proxy_file": self.proxy_file_edit.text()}
         with open(self._config_path(), "w", encoding="utf-8") as f:
@@ -646,10 +658,12 @@ class LoginWorkerThread(QThread):
                             self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 미가입 → 자동가입 시도")
                             self.worker_update.emit(worker_idx, f"자동가입: {cafe_short}")
 
-                            work_result = func.do_cafe_work(drv, acc_for_task, cafe_grades, self.settings, log_fn)
-                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {work_result['msg']}")
+                            # 가입 먼저
+                            from cafe_join import join_cafe
+                            join_result = join_cafe(drv, cafe_url, log_fn=log_fn)
+                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {join_result['msg']}")
 
-                            if work_result.get("error") == "join_failed":
+                            if not join_result.get("ok"):
                                 self.worker_update.emit(worker_idx, f"가입실패: {cafe_short}")
                                 self.work_stats["not_member"] += 1
                                 from datetime import datetime as _dt
@@ -657,32 +671,42 @@ class LoginWorkerThread(QThread):
                                     grp.get("id", ""), grp.get("pw", ""), grp.get("name", ""),
                                     grp.get("birth", ""), grp.get("gender", ""),
                                     cafe_url, task.get("menu_id", ""), "", "", "",
-                                    _dt.now().strftime("%Y-%m-%d %H:%M:%S"), "실패", work_result.get("msg", "가입실패")
+                                    _dt.now().strftime("%Y-%m-%d %H:%M:%S"), "실패", join_result.get("msg", "가입실패")
                                 ]], sheet_name="결과값", log_fn=log_fn)
-                            else:
-                                # 가입 성공 후 작업 결과 처리
-                                rows = work_result.get("result_rows", [])
-                                if rows:
-                                    self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 결과시트 기록: {len(rows)}행")
-                                    from datetime import datetime as _dt
-                                    sheet_rows = []
-                                    for r in rows:
-                                        sheet_rows.append([
-                                            r.get("id", ""), r.get("pw", ""), r.get("name", ""),
-                                            r.get("birth", ""), r.get("gender", ""),
-                                            r.get("cafe_url", ""), r.get("menu_id", ""),
-                                            r.get("url", ""), r.get("deleted", "미확인"),
-                                            r.get("manuscript", ""),
-                                            _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                            r.get("status", ""), r.get("error", ""),
-                                        ])
-                                    func.append_to_gsheet_with_color(sheet_rows, sheet_name="결과값", log_fn=log_fn)
-                                    for r in rows:
-                                        if r.get("status") == "성공":
-                                            self.work_stats["reply_ok"] += 1
-                                        else:
-                                            self.work_stats["reply_fail"] += 1
-                                    self.worker_update.emit(worker_idx, f"완료: {cafe_short}")
+                                continue
+
+                            # 가입 성공 → 등급 조회 + 작업
+                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 가입 성공 → 작업 시작")
+                            with cafe_grades_lock:
+                                if cafe_url not in cafe_grades:
+                                    grade_info = func.get_cafe_grades(drv, cafe_url, log_fn)
+                                    cafe_grades[cafe_url] = grade_info
+
+                            work_result = func.do_cafe_work(drv, acc_for_task, cafe_grades, self.settings, log_fn)
+                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {work_result['msg']}")
+
+                            rows = work_result.get("result_rows", [])
+                            if rows:
+                                self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 결과시트 기록: {len(rows)}행")
+                                from datetime import datetime as _dt
+                                sheet_rows = []
+                                for r in rows:
+                                    sheet_rows.append([
+                                        r.get("id", ""), r.get("pw", ""), r.get("name", ""),
+                                        r.get("birth", ""), r.get("gender", ""),
+                                        r.get("cafe_url", ""), r.get("menu_id", ""),
+                                        r.get("url", ""), r.get("deleted", "미확인"),
+                                        r.get("manuscript", ""),
+                                        _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        r.get("status", ""), r.get("error", ""),
+                                    ])
+                                func.append_to_gsheet_with_color(sheet_rows, sheet_name="결과값", log_fn=log_fn)
+                                for r in rows:
+                                    if r.get("status") == "성공":
+                                        self.work_stats["reply_ok"] += 1
+                                    else:
+                                        self.work_stats["reply_fail"] += 1
+                                self.worker_update.emit(worker_idx, f"완료: {cafe_short}")
                         else:
                             self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {cafe_result['msg']}")
                             self.worker_update.emit(worker_idx, f"실패: {cafe_short}")
@@ -963,6 +987,7 @@ class CafeWriterTab(QWidget):
         log_btn_layout.addWidget(btn_clear)
         btn_export = QPushButton("로그 내보내기")
         btn_export.setProperty("class", "secondary")
+        btn_export.clicked.connect(self._export_log)
         log_btn_layout.addWidget(btn_export)
         log_btn_layout.addStretch()
         log_layout.addLayout(log_btn_layout)
@@ -988,6 +1013,16 @@ class CafeWriterTab(QWidget):
             self.chk_allow_search.setEnabled(False)
         else:
             self.chk_allow_search.setEnabled(True)
+
+    def _export_log(self):
+        """로그를 txt 파일로 내보내기."""
+        from datetime import datetime
+        default_name = f"로그_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        path, _ = QFileDialog.getSaveFileName(self, "로그 내보내기", default_name, "텍스트 (*.txt)")
+        if path:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.log_area.toPlainText())
+            self._log(f"로그 내보내기 완료: {path}")
 
     def _browse_file(self, target, filt="모든 파일 (*.*)"):
         path, _ = QFileDialog.getOpenFileName(self, "파일 선택", "", filt)
@@ -1085,7 +1120,21 @@ class CafeWriterTab(QWidget):
             self.btn_pause.setEnabled(False)
             self.btn_stop.setEnabled(False)
             return
-        self._log(f"원고 {len(manuscripts)}개 로드 완료 (랜덤 셔플)")
+        self._log(f"원고 {len(manuscripts)}개 로드 완료 (폴더명 순서)")
+
+        # 원고를 아이디별 작성수에 맞게 순차 배정
+        ms_idx = 0
+        ms_assignments = {}  # {아이디: [원고1, 원고2, ...]}
+        for grp in groups:
+            nid = grp["id"]
+            total_posts = sum(t.get("post_count", 1) for t in grp.get("tasks", []))
+            assigned = []
+            for _ in range(total_posts):
+                if ms_idx < len(manuscripts):
+                    assigned.append(manuscripts[ms_idx])
+                    ms_idx += 1
+            ms_assignments[nid] = assigned
+            self._log(f"원고 배정: {nid} → {[m['name'] for m in assigned]}")
 
         # 설정 수집
         settings = {
@@ -1103,6 +1152,7 @@ class CafeWriterTab(QWidget):
                 "public": self.chk_public.isChecked(),
             },
             "manuscripts": manuscripts,
+            "ms_assignments": ms_assignments,
             "contents": [],
         }
 
