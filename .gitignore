@@ -15,3 +15,5 @@ build/
 dist/
 *.spec
 *.exe
+*.json
+test_*.py

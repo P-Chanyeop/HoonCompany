@@ -183,6 +183,18 @@ def join_cafe(driver, cafe_url, nickname=None, log_fn=None):
                 except:
                     break
 
+            # 팝업 창(새 탭/윈도우) 닫기 — 원래 탭만 남기기
+            main_handle = driver.window_handles[0]
+            if len(driver.window_handles) > 1:
+                for handle in driver.window_handles[1:]:
+                    try:
+                        driver.switch_to.window(handle)
+                        _log(f"팝업 창 닫기: {driver.title[:30]}")
+                        driver.close()
+                    except:
+                        pass
+                driver.switch_to.window(main_handle)
+
             # iframe 안에서 캡차 에러 체크 (페이지 이동 전)
             captcha_failed = False
             try:

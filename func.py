@@ -35,7 +35,13 @@ logger = logging.getLogger(__name__)
 # 클립보드 동시 접근 방지 (병렬 워커에서 pyperclip 사용 시)
 _clipboard_lock = threading.Lock()
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
+def _get_base_dir():
+    """EXE 실행 시 EXE가 있는 폴더, 스크립트 실행 시 스크립트 폴더."""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_PATH = os.path.join(_get_base_dir(), "config.ini")
 
 
 # ═══════════════════════════════════════════════
@@ -62,11 +68,11 @@ def load_accounts_from_gsheet():
     cfg = load_config()
     gs_id = cfg.get("google_sheets", "sheet_id", fallback="")
     if not gs_id:
-        return []
+        raise Exception("config.ini에 구글시트 ID(sheet_id)가 설정되지 않았습니다.")
     try:
         service = _get_sheets_service_write()
         if not service:
-            return []
+            raise Exception("구글시트 인증 실패 — credentials.json 또는 token.json을 확인하세요.")
         result = service.spreadsheets().values().get(
             spreadsheetId=gs_id, range='A2:J1000'
         ).execute()
@@ -87,7 +93,7 @@ def load_accounts_from_gsheet():
         return accounts
     except Exception as e:
         logger.error(f"구글시트 로드 실패: {e}")
-        return []
+        raise
 
 
 def group_accounts_by_id(accounts):
@@ -120,27 +126,24 @@ def group_accounts_by_id(accounts):
 # ═══════════════════════════════════════════════
 
 def _get_sheets_service_write():
-    """쓰기 가능한 구글시트 서비스 반환. OAuth 인증."""
-    from google.auth.transport.requests import Request
-    from google.oauth2.credentials import Credentials
-    from google_auth_oauthlib.flow import InstalledAppFlow
+    """쓰기 가능한 구글시트 서비스 반환. 서비스 계정 인증."""
+    from google.oauth2.service_account import Credentials
     from googleapiclient.discovery import build
 
     SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-    token_path = os.path.join(os.path.dirname(__file__), "token.json")
-    creds_path = os.path.join(os.path.dirname(__file__), "credentials.json")
-    creds = None
+    cfg = load_config()
+    sa_file = cfg.get("google_sheets", "sa_file", fallback="")
 
-    if os.path.isfile(token_path):
-        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open(token_path, "w") as f:
-            f.write(creds.to_json())
+    # sa_file이 설정되어 있으면 그 경로, 아니면 기본 credentials.json
+    if sa_file and os.path.isfile(sa_file):
+        sa_path = sa_file
+    else:
+        sa_path = os.path.join(_get_base_dir(), "credentials.json")
+
+    if not os.path.isfile(sa_path):
+        raise Exception(f"서비스 계정 키 파일이 없습니다: {sa_path}")
+
+    creds = Credentials.from_service_account_file(sa_path, scopes=SCOPES)
     return build('sheets', 'v4', credentials=creds)
 
 
@@ -688,7 +691,7 @@ def generate_random_password():
 
 
 def save_new_password(nid, new_pw):
-    filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "changed_passwords.txt")
+    filepath = os.path.join(_get_base_dir(), "changed_passwords.txt")
     with open(filepath, "a", encoding="utf-8") as f:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         f.write(f"{nid}\t{new_pw}\t{ts}\n")
@@ -719,18 +722,19 @@ def cleanup_workers():
     logger.info("워커 정리 완료")
 
 
-def create_driver(proxy_str=None, worker_id=0, chrome_version=145):
+def create_driver(proxy_str=None, worker_id=0, chrome_version=None):
     import tempfile
-    opts = uc.ChromeOptions()
-    if proxy_str:
-        opts.add_argument(f"--proxy-server={proxy_str}")
-    opts.add_argument("--disable-backgrounding-occluded-windows")
-    opts.add_argument("--disable-renderer-backgrounding")
     user_data = os.path.join(tempfile.gettempdir(), f"uc_worker_{worker_id}")
 
     # 생성 시도, 실패하면 정리 후 재시도
     for attempt in range(2):
         try:
+            opts = uc.ChromeOptions()
+            if proxy_str:
+                opts.add_argument(f"--proxy-server={proxy_str}")
+            opts.add_argument("--disable-backgrounding-occluded-windows")
+            opts.add_argument("--disable-renderer-backgrounding")
+            opts.add_argument("--disable-popup-blocking")
             driver = uc.Chrome(options=opts, version_main=chrome_version, user_data_dir=user_data)
             driver.set_window_size(1920, 1080)
             driver.set_page_load_timeout(20)

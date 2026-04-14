@@ -352,11 +352,15 @@ class SettingsTab(QWidget):
         # ── 구글시트 설정 ──
         gs_group = QGroupBox("구글시트 연동")
         gsg = QGridLayout(gs_group)
-        gsg.addWidget(QLabel("API 키:"), 0, 0)
-        self.gs_api_key = QLineEdit()
-        self.gs_api_key.setPlaceholderText("Google Sheets API 키")
-        self.gs_api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        gsg.addWidget(self.gs_api_key, 0, 1)
+        gsg.addWidget(QLabel("서비스 계정 키:"), 0, 0)
+        self.gs_sa_file = QLineEdit()
+        self.gs_sa_file.setPlaceholderText("서비스 계정 JSON 키 파일 경로")
+        gsg.addWidget(self.gs_sa_file, 0, 1)
+        btn_sa = QPushButton("찾기")
+        btn_sa.setProperty("class", "secondary")
+        btn_sa.setFixedWidth(60)
+        btn_sa.clicked.connect(lambda: self._browse_file(self.gs_sa_file, "JSON (*.json)"))
+        gsg.addWidget(btn_sa, 0, 2)
         gsg.addWidget(QLabel("시트 ID:"), 1, 0)
         self.gs_sheet_id = QLineEdit()
         self.gs_sheet_id.setPlaceholderText("스프레드시트 ID (URL에서 /d/ 뒤의 값)")
@@ -399,12 +403,12 @@ class SettingsTab(QWidget):
             target.setText(path)
 
     def _config_path(self):
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
+        return func.CONFIG_PATH
 
     def _load_config(self):
         cfg = configparser.ConfigParser()
         cfg.read(self._config_path(), encoding="utf-8")
-        self.gs_api_key.setText(cfg.get("google_sheets", "api_key", fallback=""))
+        self.gs_sa_file.setText(cfg.get("google_sheets", "sa_file", fallback=""))
         self.gs_sheet_id.setText(cfg.get("google_sheets", "sheet_id", fallback=""))
         self.gemini_api_key.setText(cfg.get("gemini", "api_key", fallback=""))
         self.proxy_file_edit.setText(cfg.get("paths", "proxy_file", fallback=""))
@@ -412,7 +416,7 @@ class SettingsTab(QWidget):
     def _save_config(self):
         cfg = configparser.ConfigParser()
         cfg["gemini"] = {"api_key": self.gemini_api_key.text()}
-        cfg["google_sheets"] = {"api_key": self.gs_api_key.text(), "sheet_id": self.gs_sheet_id.text()}
+        cfg["google_sheets"] = {"sa_file": self.gs_sa_file.text(), "sheet_id": self.gs_sheet_id.text()}
         cfg["paths"] = {"proxy_file": self.proxy_file_edit.text()}
         with open(self._config_path(), "w", encoding="utf-8") as f:
             cfg.write(f)
@@ -1012,10 +1016,15 @@ class CafeWriterTab(QWidget):
     def _on_start(self):
         # 구글시트에서 계정 로드
         self._log("구글시트에서 계정 로드 중...")
-        accounts = func.load_accounts_from_gsheet()
+        try:
+            accounts = func.load_accounts_from_gsheet()
+        except Exception as e:
+            self._log(f"구글시트 로드 실패: {str(e)}")
+            QMessageBox.warning(self, "구글시트 오류", f"구글시트에서 계정을 불러올 수 없습니다.\n\n원인: {str(e)}")
+            return
         # accounts = [a for a in accounts if a["id"] == "ssnafatemm64654"]  # 테스트용 필터
         if not accounts:
-            QMessageBox.warning(self, "알림", "구글시트에서 계정을 불러올 수 없습니다.")
+            QMessageBox.warning(self, "알림", "구글시트에 계정 데이터가 없습니다. (A2행부터 입력)")
             return
 
         # 프록시 로드 (config.ini에서)
@@ -1231,6 +1240,226 @@ class PlaceholderTab(QWidget):
 
 
 # ─────────────────────────────────────────────
+# 4순위: 카페 육성 탭
+# ─────────────────────────────────────────────
+class CafeNurturingTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        self._init_ui()
+
+    def _init_ui(self):
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(8)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # ══════════════════════════════════
+        # 좌측: 설정 패널
+        # ══════════════════════════════════
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(8)
+
+        # ── 워커 설정 ──
+        worker_group = QGroupBox("워커 설정")
+        wkg = QGridLayout(worker_group)
+        wkg.addWidget(QLabel("워커 수:"), 0, 0)
+        self.worker_slider = LabeledSlider(1, 50, 50)
+        wkg.addWidget(self.worker_slider, 0, 1, 1, 2)
+        left_layout.addWidget(worker_group)
+
+        # ── 육성 대상 카페 ──
+        cafe_group = QGroupBox("육성 대상 카페")
+        cg = QVBoxLayout(cafe_group)
+        cg.addWidget(QLabel("구글시트에서 카페 URL을 로드합니다."))
+        self.cafe_table = QTableWidget(0, 4)
+        self.cafe_table.setHorizontalHeaderLabels(["카페 URL", "현재 등급", "목표 등급", "상태"])
+        ch = self.cafe_table.horizontalHeader()
+        ch.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        ch.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        ch.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        ch.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.cafe_table.setColumnWidth(1, 80)
+        self.cafe_table.setColumnWidth(2, 80)
+        self.cafe_table.setColumnWidth(3, 80)
+        self.cafe_table.setMaximumHeight(200)
+        self.cafe_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.cafe_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.cafe_table.setAlternatingRowColors(True)
+        cg.addWidget(self.cafe_table)
+        left_layout.addWidget(cafe_group)
+
+        # ── 육성 설정 ──
+        nurture_group = QGroupBox("육성 설정")
+        ng = QGridLayout(nurture_group)
+
+        ng.addWidget(QLabel("목표 등급:"), 0, 0)
+        self.target_grade = QComboBox()
+        self.target_grade.addItems(["1단계 (자동)", "2단계", "3단계"])
+        ng.addWidget(self.target_grade, 0, 1)
+
+        ng.addWidget(QLabel("활동 유형:"), 1, 0)
+        self.chk_checkin = QCheckBox("출석")
+        self.chk_checkin.setChecked(True)
+        ng.addWidget(self.chk_checkin, 1, 1)
+        self.chk_comment = QCheckBox("댓글")
+        self.chk_comment.setChecked(True)
+        ng.addWidget(self.chk_comment, 1, 2)
+        self.chk_write = QCheckBox("글쓰기")
+        self.chk_write.setChecked(True)
+        ng.addWidget(self.chk_write, 2, 1)
+        self.chk_like = QCheckBox("좋아요")
+        self.chk_like.setChecked(True)
+        ng.addWidget(self.chk_like, 2, 2)
+
+        ng.addWidget(QLabel("딜레이(초):"), 3, 0)
+        delay_layout = QHBoxLayout()
+        self.delay_lo = QSpinBox()
+        self.delay_lo.setRange(1, 600)
+        self.delay_lo.setValue(3)
+        delay_layout.addWidget(self.delay_lo)
+        delay_layout.addWidget(QLabel("~"))
+        self.delay_hi = QSpinBox()
+        self.delay_hi.setRange(1, 600)
+        self.delay_hi.setValue(8)
+        delay_layout.addWidget(self.delay_hi)
+        delay_layout.addWidget(QLabel("초"))
+        ng.addLayout(delay_layout, 3, 1, 1, 2)
+
+        left_layout.addWidget(nurture_group)
+
+        # ── 원고 관리 ──
+        content_group = QGroupBox("원고 관리 (글쓰기/답글용)")
+        ccg = QVBoxLayout(content_group)
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(QLabel("원고 대폴더:"))
+        self.content_folder = QLineEdit()
+        self.content_folder.setPlaceholderText("대폴더 경로")
+        folder_row.addWidget(self.content_folder)
+        btn_folder = QPushButton("폴더 선택")
+        btn_folder.setProperty("class", "secondary")
+        btn_folder.setFixedWidth(80)
+        btn_folder.clicked.connect(self._browse_folder)
+        folder_row.addWidget(btn_folder)
+        self.lbl_content_count = QLabel("원고: 0개")
+        self.lbl_content_count.setStyleSheet("color: #606070; font-weight: bold;")
+        folder_row.addWidget(self.lbl_content_count)
+        ccg.addLayout(folder_row)
+        left_layout.addWidget(content_group)
+
+        left_layout.addStretch()
+
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setWidget(left_panel)
+        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setMinimumWidth(420)
+
+        # ══════════════════════════════════
+        # 우측: 실행 / 모니터링 패널
+        # ══════════════════════════════════
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
+
+        # ── 실행 컨트롤 ──
+        ctrl_group = QGroupBox("실행 제어")
+        ctrl_layout = QHBoxLayout(ctrl_group)
+
+        self.btn_start = QPushButton("▶  육성 시작")
+        self.btn_start.setProperty("class", "success")
+        self.btn_start.setMinimumHeight(38)
+        ctrl_layout.addWidget(self.btn_start)
+
+        self.btn_pause = QPushButton("⏸  일시정지")
+        self.btn_pause.setEnabled(False)
+        self.btn_pause.setMinimumHeight(38)
+        ctrl_layout.addWidget(self.btn_pause)
+
+        self.btn_stop = QPushButton("⏹  중지")
+        self.btn_stop.setProperty("class", "danger")
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.setMinimumHeight(38)
+        ctrl_layout.addWidget(self.btn_stop)
+
+        right_layout.addWidget(ctrl_group)
+
+        # ── 육성 진행 대시보드 ──
+        dash_group = QGroupBox("육성 진행 대시보드")
+        dash_layout = QVBoxLayout(dash_group)
+
+        self.dash_table = QTableWidget(0, 8)
+        self.dash_table.setHorizontalHeaderLabels([
+            "워커#", "계정", "카페", "현재등급", "목표등급", "출석", "댓글/글", "상태"
+        ])
+        dh = self.dash_table.horizontalHeader()
+        dh.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        dh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.dash_table.setColumnWidth(0, 50)
+        self.dash_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.dash_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.dash_table.setAlternatingRowColors(True)
+        dash_layout.addWidget(self.dash_table)
+
+        # 요약
+        self.lbl_summary = QLabel("로그인: 0 | 가입: 0 | 육성중: 0 | 등업완료: 0 | 실패: 0")
+        self.lbl_summary.setFont(QFont("Malgun Gothic", 11, QFont.Weight.Bold))
+        self.lbl_summary.setStyleSheet("color: #303050;")
+        dash_layout.addWidget(self.lbl_summary)
+
+        right_layout.addWidget(dash_group)
+
+        # ── 로그 ──
+        log_group = QGroupBox("결과 로그")
+        log_layout = QVBoxLayout(log_group)
+
+        self.log_area = QPlainTextEdit()
+        self.log_area.setReadOnly(True)
+        self.log_area.setMaximumBlockCount(1000)
+        self.log_area.setFont(QFont("Malgun Gothic", 10))
+        self.log_area.setStyleSheet("background-color: #fafafa; color: #202030; border: 1px solid #c0c0cc;")
+        log_layout.addWidget(self.log_area)
+
+        log_btn_layout = QHBoxLayout()
+        btn_clear = QPushButton("로그 지우기")
+        btn_clear.setProperty("class", "secondary")
+        btn_clear.clicked.connect(self.log_area.clear)
+        log_btn_layout.addWidget(btn_clear)
+        log_btn_layout.addStretch()
+        log_layout.addLayout(log_btn_layout)
+
+        right_layout.addWidget(log_group)
+
+        # 스플리터 조립
+        splitter.addWidget(left_scroll)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(1, 6)
+
+        main_layout.addWidget(splitter)
+
+        self._log("카페 육성 프로그램 초기화 완료")
+        self._log("기능 개발 진행 중 — 설정 UI만 활성화 상태입니다.")
+
+    def _log(self, msg):
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_area.appendPlainText(f"[{ts}] {msg}")
+
+    def _browse_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "원고 대폴더 선택")
+        if path:
+            self.content_folder.setText(path)
+            items = func.get_manuscript_display_list(path)
+            self.lbl_content_count.setText(f"원고: {len(items)}개")
+            self._log(f"원고 폴더 로드: {len(items)}개 키워드")
+
+
+# ─────────────────────────────────────────────
 # 메인 윈도우
 # ─────────────────────────────────────────────
 class MainWindow(QMainWindow):
@@ -1242,7 +1471,7 @@ class MainWindow(QMainWindow):
 
         # 윈도우 아이콘 설정
         from PyQt6.QtGui import QIcon
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "softcat2.ico")
+        icon_path = os.path.join(func._get_base_dir(), "softcat2.ico")
         if os.path.isfile(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
@@ -1282,12 +1511,7 @@ class MainWindow(QMainWindow):
             ["대상 게시글 자동 탐색 및 댓글 작성", "댓글 내용 템플릿 / Gemini 자동 생성",
              "계정별 댓글 간격 / 빈도 조절", "멀티워커 병렬 처리 (프록시 연동)", "결과 로깅 및 구글시트 기록"],
             "1,500,000원", "9 영업일"), "3. 댓글")
-        tabs.addTab(PlaceholderTab(
-            "카페 육성 프로그램",
-            ["1순위 글쓰기 프로그램 기능 포함", "카페 가입 → 등업 조건 자동 파악",
-             "1단계 등업까지 자동 활동 (출석, 댓글, 글쓰기 등)", "등급별 필요 활동량 자동 계산",
-             "육성 진행 상태 대시보드"],
-            "2,500,000원", "15 영업일"), "4. 카페 육성")
+        tabs.addTab(CafeNurturingTab(), "4. 카페 육성")
         tabs.addTab(PlaceholderTab(
             "카페별 등급파악 프로그램",
             ["카페별 등급 체계 자동 크롤링", "등업 조건 (글 수, 댓글 수, 출석 등) 파싱",
@@ -1321,7 +1545,7 @@ class ApiKeyAuthWindow(QDialog):
 
         # 아이콘
         from PyQt6.QtGui import QIcon
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "softcat2.ico")
+        icon_path = os.path.join(func._get_base_dir(), "softcat2.ico")
         if os.path.isfile(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
