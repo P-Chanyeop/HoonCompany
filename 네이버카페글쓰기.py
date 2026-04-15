@@ -717,6 +717,7 @@ class LoginWorkerThread(QThread):
         nid = grp["id"]
         log_fn = lambda msg, _w=worker_idx: self.log_signal.emit(f"  워커#{_w+1} {msg}")
         tasks = grp.get("tasks", [])
+        success_urls = []
 
         for t_idx, task in enumerate(tasks):
             if self._stop_flag:
@@ -765,6 +766,9 @@ class LoginWorkerThread(QThread):
                         break
 
                     self._record_work_rows(worker_idx, nid, cafe_short, work_result, log_fn)
+                    for r in work_result.get("result_rows", []):
+                        if r.get("status") == "성공" and r.get("url"):
+                            success_urls.append(r["url"])
 
                 elif cafe_result.get("need_join"):
                     self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 미가입 → 자동가입")
@@ -785,10 +789,25 @@ class LoginWorkerThread(QThread):
                     work_result = func.do_cafe_work(driver, acc_for_task, cafe_grades, self.settings, log_fn)
                     self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {work_result['msg']}")
                     self._record_work_rows(worker_idx, nid, cafe_short, work_result, log_fn)
+                    for r in work_result.get("result_rows", []):
+                        if r.get("status") == "성공" and r.get("url"):
+                            success_urls.append(r["url"])
                 else:
                     self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {cafe_result['msg']}")
             except Exception as ce:
                 self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short} 에러: {str(ce)[:60]}")
+
+        # 모든 카페 작업 완료 후 삭제 유무 체크
+        if success_urls:
+            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 삭제 유무 체크: {len(success_urls)}건")
+            self.worker_update.emit(worker_idx, f"삭제체크: {nid}")
+            url_status = {}
+            for url in success_urls:
+                status = func.check_post_deleted(driver, url, log_fn)
+                url_status[url] = status
+                self.log_signal.emit(f"  워커#{worker_idx+1} [{nid}] {url[:50]} → {status}")
+            func.update_gsheet_deleted(url_status, log_fn=log_fn)
+            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 삭제 유무 체크 완료")
 
     def _record_result(self, grp, cafe_url, task, url, status, error, log_fn):
         from datetime import datetime as _dt

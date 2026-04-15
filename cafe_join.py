@@ -592,19 +592,15 @@ def _solve_captcha(driver, _log, max_attempts=3):
                 _log("  캡차 이미지 없음 — 스킵")
                 return True
 
-            try:
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", img_el[0])
-            except:
-                pass
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", img_el[0])
+            # 브라우저 포커싱 (2Captcha가 포커스 없으면 동작 안 할 수 있음)
+            driver.switch_to.window(driver.current_window_handle)
+            driver.execute_script("window.focus();")
             time.sleep(0.3)
 
             # 이미지 다운로드
             import tempfile, urllib.request
-            try:
-                img_src = img_el[0].get_attribute("src") or ""
-            except:
-                _log("  이미지 src 가져오기 실패 — 스크린샷 시도")
-                img_src = ""
+            img_src = img_el[0].get_attribute("src") or ""
             tmp_path = None
             img_data = None
             _log(f"  캡차 이미지 src: {img_src[:80]}")
@@ -759,22 +755,33 @@ def _click_join_button(driver, _log):
     """가입 완료 버튼 클릭. 성공 시 True."""
     try:
         _switch_to_cafe_iframe(driver)
-        btn = driver.find_elements(By.CSS_SELECTOR, "a.BaseButton--skinGreen")
-        if btn:
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn[0])
-            btn[0].click()
-            _log(f"가입 버튼 클릭: {btn[0].text.strip()}")
-            return True
-        # 폴백
-        for el in driver.find_elements(By.CSS_SELECTOR, "a, button"):
-            txt = (el.text or "").strip()
-            if "동의 후 가입" in txt or "가입하기" in txt:
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-                el.click()
+
+        selectors = [
+            "a.btn_join, button.btn_join",
+            "a.btn_submit, button.btn_submit",
+            "input[type='submit']",
+        ]
+        for sel in selectors:
+            btns = driver.find_elements(By.CSS_SELECTOR, sel)
+            for btn in btns:
+                txt = (btn.text or btn.get_attribute("value") or "").strip()
+                if any(kw in txt for kw in ["가입", "완료", "신청", "확인", "동의"]):
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                    btn.click()
+                    _log(f"가입 버튼 클릭: {txt}")
+                    return True
+
+        for btn in driver.find_elements(By.CSS_SELECTOR, "a, button, input[type='submit'], input[type='button']"):
+            txt = (btn.text or btn.get_attribute("value") or "").strip()
+            if any(kw in txt for kw in ["카페 가입", "가입하기", "가입 완료", "가입 신청", "동의 후 가입"]):
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                btn.click()
                 _log(f"가입 버튼 클릭: {txt}")
                 return True
+
         _log("가입 버튼 못 찾음")
         return False
+
     except Exception as e:
         _log(f"가입 버튼 클릭 실패: {str(e)[:40]}")
         return False

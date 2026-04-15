@@ -2164,3 +2164,68 @@ def _cleanup_temp_images(processed_parts):
                     os.remove(p)
                 except:
                     pass
+
+
+def check_post_deleted(driver, url, log_fn=None):
+    """URL 접속 후 삭제 여부 판단. 반환: '정상' 또는 '삭제됨'."""
+    _log = log_fn or (lambda msg: logger.info(msg))
+    try:
+        driver.get(url)
+        time.sleep(2)
+        try:
+            alert = driver.switch_to.alert
+            alert_text = alert.text
+            alert.accept()
+            if "삭제" in alert_text or "존재하지 않는" in alert_text:
+                return "삭제됨"
+        except:
+            pass
+        return "정상"
+    except Exception as e:
+        _log(f"삭제 체크 실패 ({url[:40]}): {str(e)[:40]}")
+        return "확인실패"
+
+
+def update_gsheet_deleted(url_status_map, sheet_name="결과값", log_fn=None):
+    """
+    결과값 시트에서 URL(H열)을 찾아 삭제유무(I열)를 업데이트.
+    url_status_map: {url: "정상"|"삭제됨"|"확인실패", ...}
+    """
+    _log = log_fn or (lambda msg: logger.info(msg))
+    if not url_status_map:
+        return
+    cfg = load_config()
+    gs_id = cfg.get("google_sheets", "sheet_id", fallback="")
+    if not gs_id:
+        return
+    try:
+        service = _get_sheets_service_write()
+        if not service:
+            return
+        # H열(URL) 전체 읽기
+        result = service.spreadsheets().values().get(
+            spreadsheetId=gs_id,
+            range=f"{sheet_name}!H:H"
+        ).execute()
+        h_values = result.get("values", [])
+
+        # URL 매칭 → I열 업데이트 배치
+        updates = []
+        for row_idx, row in enumerate(h_values):
+            if not row:
+                continue
+            cell_url = row[0].strip()
+            if cell_url in url_status_map:
+                updates.append({
+                    "range": f"{sheet_name}!I{row_idx + 1}",
+                    "values": [[url_status_map[cell_url]]]
+                })
+
+        if updates:
+            service.spreadsheets().values().batchUpdate(
+                spreadsheetId=gs_id,
+                body={"valueInputOption": "USER_ENTERED", "data": updates}
+            ).execute()
+            _log(f"삭제유무 업데이트 완료: {len(updates)}건")
+    except Exception as e:
+        _log(f"삭제유무 업데이트 실패: {str(e)[:60]}")
