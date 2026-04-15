@@ -1238,7 +1238,7 @@ class CafeWriterTab(QWidget):
             self._log(f"구글시트 로드 실패: {str(e)}")
             QMessageBox.warning(self, "구글시트 오류", f"구글시트에서 계정을 불러올 수 없습니다.\n\n원인: {str(e)}")
             return
-        accounts = [a for a in accounts if a["id"] in ("sinkkf", "towardsdp", "territorypy", "logicalnyw", "dniaoetied58418")]  # 테스트용 필터
+        # accounts = [a for a in accounts if a["id"] in ("sinkkf", "towardsdp", "territorypy", "logicalnyw", "dniaoetied58418")]  # 테스트용 필터
         if not accounts:
             QMessageBox.warning(self, "알림", "구글시트에 계정 데이터가 없습니다. (A2행부터 입력)")
             return
