@@ -23,6 +23,8 @@ import undetected_chromedriver as uc
 # from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.alert import Alert
 import pyperclip
 import google.generativeai as genai
@@ -567,8 +569,8 @@ def randomize_image(image_path, output_path=None):
 def prepare_images_for_upload(body_parts, delete_after=False, log_fn=None):
     """
     원고의 body_parts에서 이미지를 처리하여 업로드 준비.
-    - 단일 사진: randomize_image
-    - 연속 사진(2장+): create_collage → randomize_image
+    - 단일 사진: randomize_image → {"type": "photo", "path": ...}
+    - 연속 사진(2장+): 개별 randomize_image → {"type": "slide", "paths": [...]}
 
     Args:
         body_parts: _parse_txt에서 반환된 body_parts
@@ -576,9 +578,8 @@ def prepare_images_for_upload(body_parts, delete_after=False, log_fn=None):
         log_fn: 로그 콜백
 
     Returns:
-        processed_parts: body_parts와 같은 구조이나,
-            photo 타입의 "files"가 처리된 단일 파일 경로로 변환됨
-            [str | {"type": "photo", "path": 처리된_이미지_경로}, ...]
+        processed_parts:
+            [str | {"type": "photo", "path": ...} | {"type": "slide", "paths": [...]}, ...]
     """
     _log = log_fn or (lambda msg: logger.info(msg))
     processed = []
@@ -594,18 +595,13 @@ def prepare_images_for_upload(body_parts, delete_after=False, log_fn=None):
             try:
                 if len(files) == 1:
                     out = randomize_image(files[0])
+                    processed.append({"type": "photo", "path": out})
+                    _log(f"이미지 처리: 1장 → {os.path.basename(out)}")
                 else:
-                    collage = create_collage(files)
-                    out = randomize_image(collage)
-                    # 콜라주 임시파일 삭제
-                    if collage != files[0]:
-                        try:
-                            os.remove(collage)
-                        except:
-                            pass
-                processed.append({"type": "photo", "path": out})
+                    paths = [randomize_image(f) for f in files]
+                    processed.append({"type": "slide", "paths": paths})
+                    _log(f"슬라이드 이미지 처리: {len(files)}장")
                 originals_to_delete.extend(files)
-                _log(f"이미지 처리: {len(files)}장 → {os.path.basename(out)}")
             except Exception as e:
                 _log(f"이미지 처리 실패: {str(e)[:60]}")
 
@@ -1618,7 +1614,6 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
                 img_path = part.get("path", "")
                 if not img_path or not os.path.isfile(img_path):
                     continue
-                # 사진 버튼 클릭 → hidden-file input 생성
                 photo_btn = driver.find_elements(By.CSS_SELECTOR, "button[data-name='image'], button[data-log='dot.img']")
                 if photo_btn:
                     photo_btn[0].click()
@@ -1630,7 +1625,29 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
                     img_count += 1
                     _log(f"이미지 업로드 {img_count}: {os.path.basename(img_path)}")
                 else:
-                    _log(f"❌ 이미지 업로드 input 못 찾음")
+                    _log("❌ 이미지 업로드 input 못 찾음")
+            elif isinstance(part, dict) and part.get("type") == "slide":
+                paths = [p for p in part.get("paths", []) if p and os.path.isfile(p)]
+                if not paths:
+                    continue
+                photo_btn = driver.find_elements(By.CSS_SELECTOR, "button[data-name='image'], button[data-log='dot.img']")
+                if photo_btn:
+                    photo_btn[0].click()
+                    time.sleep(0.5)
+                file_input = driver.find_elements(By.CSS_SELECTOR, "input#hidden-file, input[type='file'][accept*='.jpg']")
+                if file_input:
+                    file_input[0].send_keys("\n".join(os.path.abspath(p) for p in paths))
+                    time.sleep(1.5)
+                    # 슬라이드 버튼 클릭
+                    slide_btn = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, "#image-type-collage"))
+                    )
+                    slide_btn.click()
+                    time.sleep(1)
+                    img_count += len(paths)
+                    _log(f"슬라이드 업로드 {len(paths)}장")
+                else:
+                    _log("❌ 이미지 업로드 input 못 찾음")
 
         _log(f"본문 입력 완료: 텍스트 {text_count}개, 이미지 {img_count}개")
 
@@ -1771,7 +1788,6 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
                 if not img_path or not os.path.isfile(img_path):
                     _log(f"⚠ 이미지 파일 없음: {img_path}")
                     continue
-                # 사진 버튼 클릭 → hidden-file input 생성
                 photo_btn = driver.find_elements(By.CSS_SELECTOR, "button[data-name='image'], button[data-log='dot.img']")
                 if photo_btn:
                     photo_btn[0].click()
@@ -1782,6 +1798,27 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
                     time.sleep(1)
                     img_count += 1
                     _log(f"이미지 업로드 {img_count}: {os.path.basename(img_path)}")
+                else:
+                    _log("❌ 이미지 업로드 input 못 찾음")
+            elif isinstance(part, dict) and part.get("type") == "slide":
+                paths = [p for p in part.get("paths", []) if p and os.path.isfile(p)]
+                if not paths:
+                    continue
+                photo_btn = driver.find_elements(By.CSS_SELECTOR, "button[data-name='image'], button[data-log='dot.img']")
+                if photo_btn:
+                    photo_btn[0].click()
+                    time.sleep(0.5)
+                file_input = driver.find_elements(By.CSS_SELECTOR, "input#hidden-file, input[type='file'][accept*='.jpg']")
+                if file_input:
+                    file_input[0].send_keys("\n".join(os.path.abspath(p) for p in paths))
+                    time.sleep(1.5)
+                    slide_btn = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, "#image-type-collage"))
+                    )
+                    slide_btn.click()
+                    time.sleep(1)
+                    img_count += len(paths)
+                    _log(f"슬라이드 업로드 {len(paths)}장")
                 else:
                     _log("❌ 이미지 업로드 input 못 찾음")
 
