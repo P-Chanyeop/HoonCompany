@@ -457,8 +457,9 @@ class LoginWorkerThread(QThread):
         self.results = []
         self._stop_flag = False
         self._pause_flag = False
-        self._login_lock = None  # run()에서 threading.Lock()으로 초기화
+        self._login_lock = None
         self.work_stats = {"reply_ok": 0, "reply_fail": 0, "write_ok": 0, "write_fail": 0, "suspended": 0, "not_member": 0}
+        self.used_manuscripts = set()  # 사용된 원고 폴더 경로
 
     def stop(self):
         self._stop_flag = True
@@ -838,6 +839,10 @@ class LoginWorkerThread(QThread):
             for r in rows:
                 if r.get("status") == "성공":
                     self.work_stats["reply_ok"] += 1
+                    # 사용된 원고 추적
+                    ms_name = r.get("manuscript", "")
+                    if ms_name:
+                        self.used_manuscripts.add(ms_name)
                 else:
                     self.work_stats["reply_fail"] += 1
             self.worker_update.emit(worker_idx, f"완료: {cafe_short}")
@@ -1262,47 +1267,7 @@ class CafeWriterTab(QWidget):
         import random
         random.shuffle(proxies)
 
-        # 워커에 계정 분배 (라운드로빈)
-        num_workers = min(wc, len(groups))
-        worker_groups = [[] for _ in range(num_workers)]
-        for i, grp in enumerate(groups):
-            worker_groups[i % num_workers].append(grp)
-
-        # 워커별 프록시 분배 (계정 수만큼)
-        proxy_idx = 0
-        worker_assignments = []
-        for w_idx in range(num_workers):
-            accs = worker_groups[w_idx]
-            w_proxies = []
-            for _ in range(len(accs)):
-                w_proxies.append(proxies[proxy_idx % len(proxies)])
-                proxy_idx += 1
-            worker_assignments.append({
-                "worker_idx": w_idx,
-                "accounts": accs,
-                "proxies": w_proxies,
-            })
-
-        # 워커 테이블 표시
-        self.worker_table.setRowCount(num_workers)
-        for w in worker_assignments:
-            w_idx = w["worker_idx"]
-            acc_ids = [a["id"] for a in w["accounts"]]
-            self.worker_table.setItem(w_idx, 0, QTableWidgetItem(str(w_idx + 1)))
-            self.worker_table.setItem(w_idx, 1, QTableWidgetItem(f"{acc_ids[0]} +{len(acc_ids)-1}" if len(acc_ids) > 1 else acc_ids[0] if acc_ids else "-"))
-            self.worker_table.setItem(w_idx, 2, QTableWidgetItem(w["proxies"][0][:20] if w["proxies"] else "-"))
-            self.worker_table.setItem(w_idx, 3, QTableWidgetItem(f"{len(acc_ids)}개 계정"))
-            self.worker_table.setItem(w_idx, 4, QTableWidgetItem(""))
-            item = QTableWidgetItem("대기중")
-            item.setForeground(QColor("#b08800"))
-            self.worker_table.setItem(w_idx, 5, item)
-
-        self.lbl_summary.setText(f"로그인: 대기 / 총 {len(groups)}개 계정 → {num_workers}개 워커")
-
-        self._log(f"작업 시작 — 계정 {len(accounts)}행 → {len(groups)}개 그룹 → {num_workers}개 워커 / 프록시 {len(proxies)}개")
-        for w in worker_assignments:
-            acc_ids = [a["id"] for a in w["accounts"]]
-            self._log(f"워커#{w['worker_idx']+1} 배정: {acc_ids}")
+        self._log(f"작업 시작 — 계정 {len(accounts)}행 → {len(groups)}개 그룹 / 프록시 {len(proxies)}개")
 
         # 원고 로드 (테이블에 있는 원고 경로 기반)
         manuscripts = []
@@ -1325,7 +1290,7 @@ class CafeWriterTab(QWidget):
         ms_assignments = {}
         total_needed = sum(sum(t.get("post_count", 1) for t in grp.get("tasks", [])) for grp in groups)
         if total_needed > len(manuscripts):
-            self._log(f"⚠ 원고 부족: 필요 {total_needed}개 / 보유 {len(manuscripts)}개 — 원고 없는 계정은 작업 스킵됩니다")
+            self._log(f"⚠ 원고 부족: 필요 {total_needed}개 / 보유 {len(manuscripts)}개 — 원고 수만큼만 작업합니다")
         for grp in groups:
             nid = grp["id"]
             total_posts = sum(t.get("post_count", 1) for t in grp.get("tasks", []))
@@ -1337,8 +1302,58 @@ class CafeWriterTab(QWidget):
             ms_assignments[nid] = assigned
             if assigned:
                 self._log(f"원고 배정: {nid} → {[m['name'] for m in assigned]}")
-            else:
-                self._log(f"⚠ 원고 배정: {nid} → 없음 (원고 소진)")
+
+        # 원고 없는 계정 제외 → 워커 재분배
+        active_groups = [grp for grp in groups if ms_assignments.get(grp["id"])]
+        skipped = len(groups) - len(active_groups)
+        if skipped > 0:
+            self._log(f"⚠ 원고 없는 계정 {skipped}개 제외 → 활성 계정 {len(active_groups)}개")
+
+        if not active_groups:
+            QMessageBox.warning(self, "알림", "원고가 부족하여 작업할 계정이 없습니다.")
+            self.btn_start.setEnabled(True)
+            self.btn_pause.setEnabled(False)
+            self.btn_stop.setEnabled(False)
+            return
+
+        # 워커 재분배 (활성 계정만)
+        num_workers = min(wc, len(active_groups))
+        worker_groups = [[] for _ in range(num_workers)]
+        for i, grp in enumerate(active_groups):
+            worker_groups[i % num_workers].append(grp)
+
+        proxy_idx = 0
+        worker_assignments = []
+        for w_idx in range(num_workers):
+            accs = worker_groups[w_idx]
+            w_proxies = []
+            for _ in range(len(accs)):
+                w_proxies.append(proxies[proxy_idx % len(proxies)])
+                proxy_idx += 1
+            worker_assignments.append({
+                "worker_idx": w_idx,
+                "accounts": accs,
+                "proxies": w_proxies,
+            })
+
+        # 워커 테이블 재표시
+        self.worker_table.setRowCount(num_workers)
+        for w in worker_assignments:
+            w_idx = w["worker_idx"]
+            acc_ids = [a["id"] for a in w["accounts"]]
+            self.worker_table.setItem(w_idx, 0, QTableWidgetItem(str(w_idx + 1)))
+            self.worker_table.setItem(w_idx, 1, QTableWidgetItem(f"{acc_ids[0]} +{len(acc_ids)-1}" if len(acc_ids) > 1 else acc_ids[0]))
+            self.worker_table.setItem(w_idx, 2, QTableWidgetItem(w["proxies"][0][:20] if w["proxies"] else "-"))
+            self.worker_table.setItem(w_idx, 3, QTableWidgetItem(f"{len(acc_ids)}개 계정"))
+            self.worker_table.setItem(w_idx, 4, QTableWidgetItem(""))
+            item = QTableWidgetItem("대기중")
+            item.setForeground(QColor("#b08800"))
+            self.worker_table.setItem(w_idx, 5, item)
+
+        self._log(f"워커 재분배: {len(active_groups)}개 계정 → {num_workers}개 워커")
+        for w in worker_assignments:
+            acc_ids = [a["id"] for a in w["accounts"]]
+            self._log(f"워커#{w['worker_idx']+1} 배정: {acc_ids}")
 
         # 설정 수집
         settings = {
@@ -1382,9 +1397,46 @@ class CafeWriterTab(QWidget):
         self._update_summary(results)
         self._log(f"=== {self.lbl_summary.text()} ===")
         self._log(f"=== {self.lbl_work_summary.text()} ===")
+
+        # 미사용 원고 별도 폴더에 복사
+        self._save_unused_manuscripts()
+
         self.btn_start.setEnabled(True)
         self.btn_pause.setEnabled(False)
         self.btn_stop.setEnabled(False)
+
+    def _save_unused_manuscripts(self):
+        """사용되지 않은 원고를 '미사용원고' 폴더에 복사."""
+        import shutil
+        if not hasattr(self, '_worker_thread'):
+            return
+        used = self._worker_thread.used_manuscripts
+        all_manuscripts = []
+        for r in range(self.manuscript_table.rowCount()):
+            name_item = self.manuscript_table.item(r, 0)
+            path_item = self.manuscript_table.item(r, 3)
+            if name_item and path_item:
+                all_manuscripts.append({"name": name_item.text(), "path": path_item.text()})
+
+        unused = [m for m in all_manuscripts if m["name"] not in used]
+        if not unused:
+            self._log("미사용 원고 없음")
+            return
+
+        # 미사용원고 폴더 생성
+        from datetime import datetime
+        save_dir = os.path.join(func._get_base_dir(), f"미사용원고_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        os.makedirs(save_dir, exist_ok=True)
+
+        for m in unused:
+            src = m["path"]
+            dst = os.path.join(save_dir, m["name"])
+            try:
+                shutil.copytree(src, dst)
+            except Exception as e:
+                self._log(f"미사용 원고 복사 실패: {m['name']} — {str(e)[:30]}")
+
+        self._log(f"미사용 원고 {len(unused)}개 → {save_dir}")
 
     def _update_summary(self, results):
         ok = len([r for r in results if r["ok"]])

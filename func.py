@@ -327,7 +327,7 @@ def load_manuscripts(root_folder):
             if ms:
                 manuscripts.append(ms)
 
-    manuscripts.sort(key=lambda m: m["name"])
+    random.shuffle(manuscripts)
     return manuscripts
 
 
@@ -644,7 +644,7 @@ def get_manuscript_display_list(root_folder):
                 })
 
     _scan(root_folder)
-    result.sort(key=lambda x: x["name"])
+    random.shuffle(result)
     return result
 
 
