@@ -843,7 +843,7 @@ def naver_login(driver, account, log_fn=None):
 
         # ── 보호조치 ──
         if "비정상적인 활동" in page or "보호(잠금) 조치" in page or "보호하고 있습니다" in page or "idSafetyRelease" in url or "로그인 제한" in page or "로그인제한" in page:
-            return _handle_protection(driver, account, url, page, _log)
+            return {"ok": False, "msg": "보호조치 감지", "error": "needs_protection", "url": url, "page": page}
 
         # ── 이용제한 ──
         if "이용제한" in page or "이용 제한" in page:
@@ -886,13 +886,21 @@ def _handle_protection(driver, account, url, page, _log):
                 btn.click()
                 time.sleep(3)
                 dismiss_alert(driver)
-                # 휴대전화 인증만 있는지 확인 (생년월일 라디오가 없으면 휴대전화만)
-                url2, page2 = get_page_safe(driver)
-                has_birthday = bool(driver.find_elements(By.CSS_SELECTOR, "input#r_birthDate, input[value='birthDate']"))
-                has_phone = bool(driver.find_elements(By.CSS_SELECTOR, "input#r_phoneNo, input[value='phoneNo']"))
-                if has_phone and not has_birthday:
-                    _log("보호조치 - 휴대전화 인증만 존재 (해제 불가)")
-                    return {"ok": False, "msg": "보호조치 - 핸드폰 인증 (해제 불가)", "error": "blocked_phone"}
+                # 휴대전화 인증만 있는지 빠르게 판별 (implicitly_wait 짧게)
+                driver.implicitly_wait(1)
+                try:
+                    has_birthday = bool(driver.find_elements(By.CSS_SELECTOR, "input#r_birthDate, input[value='birthDate']"))
+                    has_phone = bool(driver.find_elements(By.CSS_SELECTOR, "input#r_phoneNo, input[value='phoneNo'], #ck_userMobile, label[id='ck_userMobile']"))
+                    if has_phone and not has_birthday:
+                        _log("보호조치 - 휴대전화 인증만 존재 (해제 불가)")
+                        return {"ok": False, "msg": "보호조치 - 핸드폰 인증 (해제 불가)", "error": "blocked_phone"}
+                    # 페이지 텍스트로도 판별
+                    url2, page2 = get_page_safe(driver)
+                    if ("본인 명의 휴대전화" in page2 or "userMobile" in page2) and not has_birthday:
+                        _log("보호조치 - 휴대전화 인증만 존재 (해제 불가)")
+                        return {"ok": False, "msg": "보호조치 - 핸드폰 인증 (해제 불가)", "error": "blocked_phone"}
+                finally:
+                    driver.implicitly_wait(5)
                 # 생년월일 입력 시도
                 if account.get("name") and account.get("birth"):
                     result = _solve_birthday(driver, account, _log)

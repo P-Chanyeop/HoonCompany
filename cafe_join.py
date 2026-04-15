@@ -165,7 +165,7 @@ def join_cafe(driver, cafe_url, nickname=None, log_fn=None):
 
         # 5~7) 캡차 + 약관 + 가입 버튼 (최대 3회 재시도)
         for captcha_try in range(3):
-            captcha_ok = _solve_captcha(driver, _log, max_attempts=1)
+            captcha_ok = _solve_captcha(driver, _log, max_attempts=3)
             if not captcha_ok:
                 _log(f"캡차 인식 실패 ({captcha_try+1}/3)")
                 # 새로고침
@@ -543,30 +543,59 @@ def _handle_join_questions(driver, _log):
 
 
 def _solve_captcha(driver, _log, max_attempts=3):
-    """2Captcha API로 캡차 풀기. 실패 시 Gemini 폴백."""
-    try:
-        _switch_to_cafe_iframe(driver)
-
-        for attempt in range(1, max_attempts + 1):
+    """2Captcha API로 캡차 풀기."""
+    for attempt in range(1, max_attempts + 1):
+        try:
             _log(f"캡차 시도 {attempt}/{max_attempts}")
+
+            # 매 시도마다 iframe 재전환
+            try:
+                driver.switch_to.default_content()
+            except:
+                pass
+            _switch_to_cafe_iframe(driver)
+            _log("  iframe 전환 완료")
 
             if attempt > 1:
                 try:
-                    refresh_btn = driver.find_elements(By.CSS_SELECTOR, "button:has(.join_captcha_refresh), .join_captcha_info button")
-                    if refresh_btn:
-                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", refresh_btn[0])
-                        refresh_btn[0].click()
-                        _log("  캡차 새로고침...")
-                        time.sleep(1)
+                    refresh_btn = driver.find_elements(By.CSS_SELECTOR, ".join_captcha_info button, button.btn")
+                    for rb in refresh_btn:
+                        try:
+                            if "새로고침" in (rb.text or "") or rb.find_elements(By.CSS_SELECTOR, ".join_captcha_refresh"):
+                                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", rb)
+                                rb.click()
+                                _log("  캡차 새로고침...")
+                                time.sleep(1)
+                                break
+                        except:
+                            continue
                 except:
                     _log("  새로고침 버튼 못 찾음")
 
+            _log("  캡차 이미지 탐색...")
             img_el = driver.find_elements(By.CSS_SELECTOR, ".join_captcha_area img")
+            _log(f"  iframe 안 이미지: {len(img_el)}개")
             if not img_el:
-                _log("캡차 이미지 없음 — 스킵")
+                time.sleep(2)
+                img_el = driver.find_elements(By.CSS_SELECTOR, ".join_captcha_area img")
+                _log(f"  2초 대기 후 이미지: {len(img_el)}개")
+            if not img_el:
+                try:
+                    driver.switch_to.default_content()
+                    img_el = driver.find_elements(By.CSS_SELECTOR, ".join_captcha_area img, #captchaimg, img[src*='captcha']")
+                    _log(f"  iframe 밖 이미지: {len(img_el)}개")
+                    if not img_el:
+                        _switch_to_cafe_iframe(driver)
+                except:
+                    pass
+            if not img_el:
+                _log("  캡차 이미지 없음 — 스킵")
                 return True
 
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", img_el[0])
+            # 브라우저 포커싱 (2Captcha가 포커스 없으면 동작 안 할 수 있음)
+            driver.switch_to.window(driver.current_window_handle)
+            driver.execute_script("window.focus();")
             time.sleep(0.3)
 
             # 이미지 다운로드
@@ -574,6 +603,7 @@ def _solve_captcha(driver, _log, max_attempts=3):
             img_src = img_el[0].get_attribute("src") or ""
             tmp_path = None
             img_data = None
+            _log(f"  캡차 이미지 src: {img_src[:80]}")
 
             if img_src.startswith("http"):
                 try:
@@ -582,13 +612,25 @@ def _solve_captcha(driver, _log, max_attempts=3):
                     urllib.request.urlretrieve(img_src, tmp_path)
                     with open(tmp_path, "rb") as f:
                         img_data = f.read()
-                    _log(f"  캡차 이미지 다운로드: {len(img_data)}bytes")
-                except:
+                    _log(f"  캡차 이미지 다운로드 성공: {len(img_data)}bytes")
+                except Exception as dl_err:
+                    _log(f"  캡차 이미지 다운로드 실패: {str(dl_err)[:40]}")
                     img_data = None
+            else:
+                _log(f"  캡차 이미지 src가 http가 아님 — 스크린샷 시도")
 
             if not img_data:
-                img_b64 = img_el[0].screenshot_as_base64
-                img_data = base64.b64decode(img_b64)
+                try:
+                    img_b64 = img_el[0].screenshot_as_base64
+                    img_data = base64.b64decode(img_b64)
+                    _log(f"  캡차 스크린샷 성공: {len(img_data)}bytes")
+                except Exception as ss_err:
+                    _log(f"  캡차 스크린샷 실패: {str(ss_err)[:40]}")
+                    continue
+
+            if not img_data:
+                _log(f"  이미지 데이터 없음 ({attempt}/{max_attempts})")
+                continue
 
             # 2Captcha로 풀기
             captcha_text = _solve_with_2captcha(img_data, _log)
@@ -605,20 +647,31 @@ def _solve_captcha(driver, _log, max_attempts=3):
                 continue
 
             # 캡차 입력
-            captcha_input = driver.find_element(By.CSS_SELECTOR, "#captcha")
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", captcha_input)
-            captcha_input.clear()
+            captcha_inputs = driver.find_elements(By.CSS_SELECTOR, "#captcha, input[name='captcha']")
+            if not captcha_inputs:
+                # iframe 전환 재시도
+                try:
+                    driver.switch_to.default_content()
+                except:
+                    pass
+                _switch_to_cafe_iframe(driver)
+                captcha_inputs = driver.find_elements(By.CSS_SELECTOR, "#captcha, input[name='captcha']")
+            if not captcha_inputs:
+                _log(f"  캡차 입력 영역 못 찾음 ({attempt}/{max_attempts})")
+                continue
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", captcha_inputs[0])
+            captcha_inputs[0].clear()
             time.sleep(0.1)
-            captcha_input.send_keys(captcha_text)
+            captcha_inputs[0].send_keys(captcha_text)
             _log(f"  캡차 입력 완료: {captcha_text}")
             time.sleep(0.2)
             return True
 
-        return False
+        except Exception as e:
+            _log(f"  캡차 처리 에러 ({attempt}/{max_attempts}): {str(e)[:60]}")
+            continue
 
-    except Exception as e:
-        _log(f"캡차 처리 실패: {str(e)[:60]}")
-        return False
+    return False
 
 
 def _solve_with_2captcha(img_data, _log):

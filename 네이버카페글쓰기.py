@@ -440,26 +440,29 @@ class SettingsTab(QWidget):
 # 로그인 워커 스레드
 # ─────────────────────────────────────────────
 class LoginWorkerThread(QThread):
-    """순차적으로 계정 로그인을 수행하는 워커 스레드."""
+    """워커별 계정 순차 처리 스레드. 로그인은 글로벌 락, 카페 작업은 병렬."""
     log_signal = pyqtSignal(str)
     worker_update = pyqtSignal(int, str)  # idx, status
     finished_signal = pyqtSignal(list)  # results
 
-    def __init__(self, accounts, proxies, worker_count, settings=None):
+    def __init__(self, worker_assignments, proxies, settings=None):
+        """
+        worker_assignments: [{worker_idx, accounts: [{id,pw,...,tasks:[...]},...]}]
+        proxies: 전체 프록시 리스트
+        """
         super().__init__()
-        self.accounts = accounts
+        self.worker_assignments = worker_assignments
         self.proxies = proxies
-        self.worker_count = worker_count
         self.settings = settings or {}
-        self.drivers = []
         self.results = []
         self._stop_flag = False
         self._pause_flag = False
+        self._login_lock = None  # run()에서 threading.Lock()으로 초기화
         self.work_stats = {"reply_ok": 0, "reply_fail": 0, "write_ok": 0, "write_fail": 0, "suspended": 0, "not_member": 0}
 
     def stop(self):
         self._stop_flag = True
-        self._pause_flag = False  # 일시정지 상태에서 중지 누르면 풀어줘야 함
+        self._pause_flag = False
 
     def pause(self):
         self._pause_flag = True
@@ -468,27 +471,18 @@ class LoginWorkerThread(QThread):
         self._pause_flag = False
 
     def _wait_if_paused(self):
-        """일시정지 상태면 풀릴 때까지 대기."""
         import time as _time
         while self._pause_flag and not self._stop_flag:
             _time.sleep(0.5)
 
-    def cleanup_drivers(self):
-        """모든 크롬 드라이버 종료."""
-        for item in self.drivers:
-            try:
-                drv = item[2] if isinstance(item, tuple) else item
-                drv.quit()
-            except:
-                pass
-        self.drivers = []
-
     def run(self):
-        import concurrent.futures
-        count = min(self.worker_count, len(self.accounts), len(self.proxies))
+        import concurrent.futures, threading, shutil, tempfile, glob
 
-        # ── 초기 정리 (임시 폴더만, 크롬 프로세스는 안 죽임) ──
-        import shutil, tempfile, glob
+        self._login_lock = threading.Lock()
+        cafe_grades = {}
+        cafe_grades_lock = threading.Lock()
+
+        # 임시 폴더 정리
         tmp = tempfile.gettempdir()
         for d in glob.glob(os.path.join(tmp, "uc_worker_*")):
             try:
@@ -497,238 +491,339 @@ class LoginWorkerThread(QThread):
                 pass
         self.log_signal.emit("임시 폴더 정리 완료")
 
-        # ── 1단계: 로그인 순차 실행 ──
-        self.log_signal.emit("=== 1단계: 로그인 (순차) ===")
-        for i in range(count):
+        num_workers = len(self.worker_assignments)
+        self.log_signal.emit(f"=== 워커 {num_workers}개 시작 ===")
+
+        # ── 1라운드: 순차 로그인 → 동시 작업 ──
+        self.log_signal.emit("=== 1라운드: 순차 로그인 ===")
+        first_round_drivers = {}  # {worker_idx: (driver, grp)}
+
+        for w in self.worker_assignments:
             if self._stop_flag:
                 break
             self._wait_if_paused()
 
-            acc = self.accounts[i]
-            proxy = self.proxies[i]
-            nid = acc["id"]
+            worker_idx = w["worker_idx"]
+            if not w["accounts"]:
+                continue
+            grp = w["accounts"][0]
+            proxy = w["proxies"][0] if w["proxies"] else ""
+            nid = grp["id"]
 
-            self.log_signal.emit(f"워커#{i+1} 프록시={proxy} / ID={nid}")
-            self.worker_update.emit(i, "로그인 중...")
+            self.log_signal.emit(f"워커#{worker_idx+1} 프록시={proxy} / ID={nid} (1/{len(w['accounts'])})")
+            self.worker_update.emit(worker_idx, f"로그인 중: {nid}")
 
+            driver = None
             try:
-                driver = func.create_driver(proxy, i)
-                log_fn = lambda msg, _i=i: self.log_signal.emit(f"  워커#{_i+1} {msg}")
-                result = func.naver_login(driver, acc, log_fn)
-                result["worker"] = i
+                driver = func.create_driver(proxy, worker_idx)
+                log_fn = lambda msg, _w=worker_idx: self.log_signal.emit(f"  워커#{_w+1} {msg}")
+                result = func.naver_login(driver, grp, log_fn)
+                result["worker"] = worker_idx
                 result["id"] = nid
                 self.results.append(result)
 
                 if result["ok"]:
-                    self.worker_update.emit(i, "로그인 성공")
-                    self.log_signal.emit(f"워커#{i+1} [성공] [{nid}] {result['msg']}")
-                    self.drivers.append((i, acc, driver))
-                else:
-                    self.worker_update.emit(i, result["msg"][:30])
-                    self.log_signal.emit(f"워커#{i+1} [실패] [{nid}] {result['msg']}")
-                    if result.get("error") in ("blocked_phone", "permanent_ban", "login_fail", "exception"):
+                    self.log_signal.emit(f"워커#{worker_idx+1} [성공] [{nid}] {result['msg']}")
+                    self.worker_update.emit(worker_idx, f"로그인 성공: {nid}")
+                    first_round_drivers[worker_idx] = (driver, grp, w)
+                elif result.get("error") == "needs_protection":
+                    # 보호조치 감지 — 1라운드에서는 해제 시도 (순차이므로 OK)
+                    self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 보호조치 감지 → 해제 시도")
+                    self.worker_update.emit(worker_idx, f"보호조치 해제: {nid}")
+                    prot_result = func._handle_protection(driver, grp, result.get("url", ""), result.get("page", ""), log_fn)
+                    if prot_result and prot_result.get("ok"):
+                        self.log_signal.emit(f"워커#{worker_idx+1} [성공] [{nid}] {prot_result['msg']}")
+                        self.worker_update.emit(worker_idx, f"로그인 성공: {nid}")
+                        prot_result["worker"] = worker_idx
+                        prot_result["id"] = nid
+                        self.results.append(prot_result)
+                        first_round_drivers[worker_idx] = (driver, grp, w)
+                    else:
+                        msg = prot_result["msg"] if prot_result else "보호조치 해제 실패"
+                        self.log_signal.emit(f"워커#{worker_idx+1} [실패] [{nid}] {msg}")
+                        self.worker_update.emit(worker_idx, f"로그인 실패: {nid}")
+                        self.results.append(prot_result or {"ok": False, "msg": msg, "error": "blocked_unknown", "worker": worker_idx, "id": nid})
                         try:
                             driver.quit()
                         except:
                             pass
-                    else:
-                        self.drivers.append((i, acc, driver))
-
+                        self._cleanup_worker_dir(worker_idx)
+                else:
+                    self.log_signal.emit(f"워커#{worker_idx+1} [실패] [{nid}] {result['msg']}")
+                    self.worker_update.emit(worker_idx, f"로그인 실패: {nid}")
+                    try:
+                        driver.quit()
+                    except:
+                        pass
+                    self._cleanup_worker_dir(worker_idx)
             except Exception as e:
-                self.log_signal.emit(f"워커#{i+1} [실패] [{nid}] {str(e)[:60]}")
-                self.worker_update.emit(i, f"에러: {str(e)[:20]}")
+                self.log_signal.emit(f"워커#{worker_idx+1} [실패] [{nid}] {str(e)[:60]}")
+                self.worker_update.emit(worker_idx, f"에러: {nid}")
+                self.results.append({"ok": False, "msg": str(e)[:60], "error": "exception", "worker": worker_idx, "id": nid})
+                if driver:
+                    try:
+                        driver.quit()
+                    except:
+                        pass
+                self._cleanup_worker_dir(worker_idx)
 
-        # 로그인 결과 집계
-        ok = len([r for r in self.results if r["ok"]])
-        total = len(self.results)
-        self.log_signal.emit(f"=== 로그인 완료: 성공 {ok}/{total} ===")
+        ok_count = len(first_round_drivers)
+        total_count = len(self.results)
+        self.log_signal.emit(f"=== 1라운드 로그인 완료: 성공 {ok_count}/{total_count} ===")
 
-        # ── 2단계: 카페 작업 병렬 실행 ──
-        logged_in = [(i, acc, drv) for i, acc, drv in self.drivers if any(
-            r["ok"] and r["worker"] == i for r in self.results)]
+        if self._stop_flag:
+            self.log_signal.emit("=== 전체 작업 완료 ===")
+            self.finished_signal.emit(self.results)
+            return
 
-        if logged_in and not self._stop_flag:
-            import threading
-            cafe_grades = {}  # {cafe_url: grade_info}
-            cafe_grades_lock = threading.Lock()
+        # ── 1라운드 카페 작업 (병렬) + 2라운드~ 워커별 자율 ──
+        self.log_signal.emit(f"=== 카페 작업 시작 (워커 {num_workers}개) ===")
 
-            # ── 2단계: 카페 접속 + 등급 조회 + 작업 (병렬) ──
-            self.log_signal.emit(f"=== 2단계: 카페 작업 (병렬 {len(logged_in)}개) ===")
+        def worker_loop(worker_idx, driver, first_grp, assignment):
+            """1라운드 카페 작업 + 2라운드~ 로그인+작업 반복."""
+            account_list = assignment["accounts"]
+            proxy_list = assignment["proxies"]
+            start_idx = 1  # 2라운드 시작 인덱스 (첫 번째는 1라운드에서 처리)
 
-            def cafe_task(worker_idx, grp, drv):
-                log_fn = lambda msg: self.log_signal.emit(f"  워커#{worker_idx+1} {msg}")
+            # 1라운드: 로그인 성공한 경우만 카페 작업
+            if driver and first_grp:
+                self._do_account_work(worker_idx, driver, first_grp, cafe_grades, cafe_grades_lock)
+                self.log_signal.emit(f"워커#{worker_idx+1} [{first_grp['id']}] 작업 완료 → 브라우저 종료")
+                try:
+                    driver.quit()
+                except:
+                    pass
+                self._cleanup_worker_dir(worker_idx)
+
+            # 2라운드~: 나머지 계정 순차 처리
+            for acc_idx in range(start_idx, len(account_list)):
+                if self._stop_flag:
+                    break
+                self._wait_if_paused()
+
+                grp = account_list[acc_idx]
+                proxy = proxy_list[acc_idx % len(proxy_list)] if proxy_list else ""
                 nid = grp["id"]
-                tasks = grp.get("tasks", [])
 
-                for t_idx, task in enumerate(tasks):
+                # 로그인 (글로벌 락)
+                self.worker_update.emit(worker_idx, f"로그인 대기: {nid}")
+                with self._login_lock:
                     if self._stop_flag:
                         break
-                    self._wait_if_paused()
+                    self.log_signal.emit(f"워커#{worker_idx+1} 프록시={proxy} / ID={nid} ({acc_idx+1}/{len(account_list)})")
+                    self.worker_update.emit(worker_idx, f"로그인 중: {nid}")
 
-                    cafe_url = task.get("cafe_url", "")
-                    if not cafe_url:
+                    drv = None
+                    login_ok = False
+                    needs_prot = False
+                    prot_data = None
+                    try:
+                        drv = func.create_driver(proxy, worker_idx)
+                        log_fn = lambda msg, _w=worker_idx: self.log_signal.emit(f"  워커#{_w+1} {msg}")
+                        result = func.naver_login(drv, grp, log_fn)
+                        result["worker"] = worker_idx
+                        result["id"] = nid
+                        self.results.append(result)
+
+                        if result["ok"]:
+                            self.log_signal.emit(f"워커#{worker_idx+1} [성공] [{nid}] {result['msg']}")
+                            self.worker_update.emit(worker_idx, f"로그인 성공: {nid}")
+                            login_ok = True
+                        elif result.get("error") == "needs_protection":
+                            needs_prot = True
+                            prot_data = result
+                        else:
+                            self.log_signal.emit(f"워커#{worker_idx+1} [실패] [{nid}] {result['msg']}")
+                            self.worker_update.emit(worker_idx, f"로그인 실패: {nid}")
+                            try:
+                                drv.quit()
+                            except:
+                                pass
+                            self._cleanup_worker_dir(worker_idx)
+                            continue
+                    except Exception as e:
+                        self.log_signal.emit(f"워커#{worker_idx+1} [실패] [{nid}] {str(e)[:60]}")
+                        self.worker_update.emit(worker_idx, f"에러: {nid}")
+                        self.results.append({"ok": False, "msg": str(e)[:60], "error": "exception", "worker": worker_idx, "id": nid})
+                        if drv:
+                            try:
+                                drv.quit()
+                            except:
+                                pass
+                        self._cleanup_worker_dir(worker_idx)
                         continue
 
-                    cafe_short = cafe_url.replace("https://cafe.naver.com/", "")
-                    self.worker_update.emit(worker_idx, f"카페 접속: {cafe_short} ({t_idx+1}/{len(tasks)})")
-                    self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 카페 접속: {cafe_short}")
+                # 보호조치 해제 (락 밖 — 다른 워커 로그인 안 막음)
+                if needs_prot:
+                    self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 보호조치 감지 → 해제 시도")
+                    self.worker_update.emit(worker_idx, f"보호조치 해제: {nid}")
+                    log_fn = lambda msg, _w=worker_idx: self.log_signal.emit(f"  워커#{_w+1} {msg}")
+                    prot_result = func._handle_protection(drv, grp, prot_data.get("url", ""), prot_data.get("page", ""), log_fn)
+                    if prot_result and prot_result.get("ok"):
+                        self.log_signal.emit(f"워커#{worker_idx+1} [성공] [{nid}] {prot_result['msg']}")
+                        login_ok = True
+                    else:
+                        msg = prot_result["msg"] if prot_result else "보호조치 해제 실패"
+                        self.log_signal.emit(f"워커#{worker_idx+1} [실패] [{nid}] {msg}")
+                        self.worker_update.emit(worker_idx, f"로그인 실패: {nid}")
+                        try:
+                            drv.quit()
+                        except:
+                            pass
+                        self._cleanup_worker_dir(worker_idx)
+                        continue
 
-                    try:
-                        acc_for_task = {**grp, **task}
-                        cafe_result = func.visit_cafe(drv, acc_for_task, log_fn)
+                if not login_ok:
+                    continue
 
-                        if cafe_result.get("ok"):
-                            # 등급 조회 (캐시 — 같은 카페면 1번만)
-                            need_grade = False
-                            with cafe_grades_lock:
-                                if cafe_url not in cafe_grades:
-                                    cafe_grades[cafe_url] = None  # 예약 (다른 워커가 중복 조회 안 하게)
-                                    need_grade = True
+                # 카페 작업 (락 밖)
+                self._do_account_work(worker_idx, drv, grp, cafe_grades, cafe_grades_lock)
 
-                            if need_grade:
-                                self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 등급 조회: {cafe_short}")
-                                grade_info = func.get_cafe_grades(drv, cafe_url, log_fn)
-                                with cafe_grades_lock:
-                                    cafe_grades[cafe_url] = grade_info
-                            else:
-                                # 다른 워커가 조회 중이면 완료될 때까지 대기
-                                for _ in range(30):
-                                    with cafe_grades_lock:
-                                        if cafe_grades.get(cafe_url) is not None:
-                                            break
-                                    import time as _time
-                                    _time.sleep(1)
-                                self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 등급 캐시 사용: {cafe_short}")
+                # 브라우저 종료
+                self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 작업 완료 → 브라우저 종료")
+                try:
+                    drv.quit()
+                except:
+                    pass
+                self._cleanup_worker_dir(worker_idx)
 
-                            self.worker_update.emit(worker_idx, f"작업 중: {cafe_short}")
-                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 작업 시작")
-                            work_result = func.do_cafe_work(drv, acc_for_task, cafe_grades, self.settings, log_fn)
-                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {work_result['msg']}")
+            self.worker_update.emit(worker_idx, f"전체 완료 ({len(account_list)}개 계정)")
+            self.log_signal.emit(f"워커#{worker_idx+1} 전체 완료")
 
-                            # 활동정지 → 상태 표시 + 구글시트 기록 + 창 종료
-                            if work_result.get("error") == "suspended":
-                                self.worker_update.emit(worker_idx, f"활동정지: {cafe_short}")
-                                self.work_stats["suspended"] += 1
-                                from datetime import datetime as _dt
-                                func.append_to_gsheet_with_color([[
-                                    grp.get("id", ""), grp.get("pw", ""), grp.get("name", ""),
-                                    grp.get("birth", ""), grp.get("gender", ""),
-                                    cafe_url, task.get("menu_id", ""), "", "", "",
-                                    _dt.now().strftime("%Y-%m-%d %H:%M:%S"), "실패", "활동정지"
-                                ]], sheet_name="결과값", log_fn=log_fn)
-                                try:
-                                    drv.quit()
-                                except:
-                                    pass
-                                return
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = []
+            for w in self.worker_assignments:
+                w_idx = w["worker_idx"]
+                if w_idx in first_round_drivers:
+                    drv, grp, assignment = first_round_drivers[w_idx]
+                    futures.append(pool.submit(worker_loop, w_idx, drv, grp, assignment))
+                else:
+                    # 1라운드 실패 워커 — driver=None, first_grp=None
+                    futures.append(pool.submit(worker_loop, w_idx, None, None, w))
+            concurrent.futures.wait(futures)
 
-                            # 결과시트 기록 (작성된 글 1개당 1행)
-                            rows = work_result.get("result_rows", [])
-                            if rows:
-                                self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 결과시트 기록: {len(rows)}행")
-                                from datetime import datetime as _dt
-                                sheet_rows = []
-                                for r in rows:
-                                    sheet_rows.append([
-                                        r.get("id", ""),
-                                        r.get("pw", ""),
-                                        r.get("name", ""),
-                                        r.get("birth", ""),
-                                        r.get("gender", ""),
-                                        r.get("cafe_url", ""),
-                                        r.get("menu_id", ""),
-                                        r.get("url", ""),
-                                        r.get("deleted", "미확인"),
-                                        r.get("manuscript", ""),
-                                        _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                        r.get("status", ""),
-                                        r.get("error", ""),
-                                    ])
-                                func.append_to_gsheet_with_color(sheet_rows, sheet_name="결과값", log_fn=log_fn)
-                                # 작업 카운터 업데이트
-                                for r in rows:
-                                    if r.get("status") == "성공":
-                                        self.work_stats["reply_ok"] += 1
-                                    else:
-                                        self.work_stats["reply_fail"] += 1
-                                self.worker_update.emit(worker_idx, f"완료: {cafe_short}")
-                            else:
-                                self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 작성된 글 없음")
-                        elif cafe_result.get("need_join"):
-                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 미가입 → 자동가입 시도")
-                            self.worker_update.emit(worker_idx, f"자동가입: {cafe_short}")
-
-                            # 가입 먼저
-                            from cafe_join import join_cafe
-                            join_result = join_cafe(drv, cafe_url, log_fn=log_fn)
-                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {join_result['msg']}")
-
-                            if not join_result.get("ok"):
-                                self.worker_update.emit(worker_idx, f"가입실패: {cafe_short}")
-                                self.work_stats["not_member"] += 1
-                                from datetime import datetime as _dt
-                                func.append_to_gsheet_with_color([[
-                                    grp.get("id", ""), grp.get("pw", ""), grp.get("name", ""),
-                                    grp.get("birth", ""), grp.get("gender", ""),
-                                    cafe_url, task.get("menu_id", ""), "", "", "",
-                                    _dt.now().strftime("%Y-%m-%d %H:%M:%S"), "실패", join_result.get("msg", "가입실패")
-                                ]], sheet_name="결과값", log_fn=log_fn)
-                                continue
-
-                            # 가입 성공 → 등급 조회 + 작업
-                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 가입 성공 → 작업 시작")
-                            with cafe_grades_lock:
-                                if cafe_url not in cafe_grades:
-                                    grade_info = func.get_cafe_grades(drv, cafe_url, log_fn)
-                                    cafe_grades[cafe_url] = grade_info
-
-                            work_result = func.do_cafe_work(drv, acc_for_task, cafe_grades, self.settings, log_fn)
-                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {work_result['msg']}")
-
-                            rows = work_result.get("result_rows", [])
-                            if rows:
-                                self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 결과시트 기록: {len(rows)}행")
-                                from datetime import datetime as _dt
-                                sheet_rows = []
-                                for r in rows:
-                                    sheet_rows.append([
-                                        r.get("id", ""), r.get("pw", ""), r.get("name", ""),
-                                        r.get("birth", ""), r.get("gender", ""),
-                                        r.get("cafe_url", ""), r.get("menu_id", ""),
-                                        r.get("url", ""), r.get("deleted", "미확인"),
-                                        r.get("manuscript", ""),
-                                        _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                        r.get("status", ""), r.get("error", ""),
-                                    ])
-                                func.append_to_gsheet_with_color(sheet_rows, sheet_name="결과값", log_fn=log_fn)
-                                for r in rows:
-                                    if r.get("status") == "성공":
-                                        self.work_stats["reply_ok"] += 1
-                                    else:
-                                        self.work_stats["reply_fail"] += 1
-                                self.worker_update.emit(worker_idx, f"완료: {cafe_short}")
-                        else:
-                            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {cafe_result['msg']}")
-                            self.worker_update.emit(worker_idx, f"실패: {cafe_short}")
-                    except Exception as ce:
-                        self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short} 에러: {str(ce)[:60]}")
-
-                self.worker_update.emit(worker_idx, f"완료 ({len(tasks)}개 카페)")
-                self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 전체 작업 완료")
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(logged_in)) as pool:
-                futures = [pool.submit(cafe_task, i, grp, drv) for i, grp, drv in logged_in]
-                concurrent.futures.wait(futures)
-
-            self.log_signal.emit("=== 카페 접속 완료 ===")
-
-        # 중지 시 모든 크롬 드라이버 종료
-        if self._stop_flag:
-            self.log_signal.emit("중지됨 — 크롬 드라이버 종료 중...")
-            self.cleanup_drivers()
-            self.log_signal.emit("크롬 드라이버 전부 종료 완료")
-
+        self.log_signal.emit("=== 전체 작업 완료 ===")
         self.finished_signal.emit(self.results)
+
+    def _cleanup_worker_dir(self, worker_idx):
+        import shutil as _shutil, tempfile as _tf
+        try:
+            _shutil.rmtree(os.path.join(_tf.gettempdir(), f"uc_worker_{worker_idx}"), ignore_errors=True)
+        except:
+            pass
+
+    def _do_account_work(self, worker_idx, driver, grp, cafe_grades, cafe_grades_lock):
+        """한 계정의 카페 작업 수행."""
+        nid = grp["id"]
+        log_fn = lambda msg, _w=worker_idx: self.log_signal.emit(f"  워커#{_w+1} {msg}")
+        tasks = grp.get("tasks", [])
+
+        for t_idx, task in enumerate(tasks):
+            if self._stop_flag:
+                break
+            self._wait_if_paused()
+
+            cafe_url = task.get("cafe_url", "")
+            if not cafe_url:
+                continue
+
+            cafe_short = cafe_url.replace("https://cafe.naver.com/", "")
+            self.worker_update.emit(worker_idx, f"카페: {cafe_short} ({t_idx+1}/{len(tasks)})")
+            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 카페 접속: {cafe_short}")
+
+            try:
+                acc_for_task = {**grp, **task}
+                cafe_result = func.visit_cafe(driver, acc_for_task, log_fn)
+
+                if cafe_result.get("ok"):
+                    need_grade = False
+                    with cafe_grades_lock:
+                        if cafe_url not in cafe_grades:
+                            cafe_grades[cafe_url] = None
+                            need_grade = True
+                    if need_grade:
+                        self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 등급 조회: {cafe_short}")
+                        gi = func.get_cafe_grades(driver, cafe_url, log_fn)
+                        with cafe_grades_lock:
+                            cafe_grades[cafe_url] = gi
+                    else:
+                        for _ in range(30):
+                            with cafe_grades_lock:
+                                if cafe_grades.get(cafe_url) is not None:
+                                    break
+                            import time as _time
+                            _time.sleep(1)
+
+                    self.worker_update.emit(worker_idx, f"작업 중: {cafe_short}")
+                    work_result = func.do_cafe_work(driver, acc_for_task, cafe_grades, self.settings, log_fn)
+                    self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {work_result['msg']}")
+
+                    if work_result.get("error") == "suspended":
+                        self.worker_update.emit(worker_idx, f"활동정지: {nid}")
+                        self.work_stats["suspended"] += 1
+                        self._record_result(grp, cafe_url, task, "", "실패", "활동정지", log_fn)
+                        break
+
+                    self._record_work_rows(worker_idx, nid, cafe_short, work_result, log_fn)
+
+                elif cafe_result.get("need_join"):
+                    self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 미가입 → 자동가입")
+                    self.worker_update.emit(worker_idx, f"자동가입: {cafe_short}")
+                    from cafe_join import join_cafe
+                    join_result = join_cafe(driver, cafe_url, log_fn=log_fn)
+                    self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {join_result['msg']}")
+
+                    if not join_result.get("ok"):
+                        self.work_stats["not_member"] += 1
+                        self._record_result(grp, cafe_url, task, "", "실패", join_result.get("msg", "가입실패"), log_fn)
+                        continue
+
+                    self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 가입 성공 → 작업")
+                    with cafe_grades_lock:
+                        if cafe_url not in cafe_grades:
+                            cafe_grades[cafe_url] = func.get_cafe_grades(driver, cafe_url, log_fn)
+                    work_result = func.do_cafe_work(driver, acc_for_task, cafe_grades, self.settings, log_fn)
+                    self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {work_result['msg']}")
+                    self._record_work_rows(worker_idx, nid, cafe_short, work_result, log_fn)
+                else:
+                    self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {cafe_result['msg']}")
+            except Exception as ce:
+                self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short} 에러: {str(ce)[:60]}")
+
+    def _record_result(self, grp, cafe_url, task, url, status, error, log_fn):
+        from datetime import datetime as _dt
+        func.append_to_gsheet_with_color([[
+            grp.get("id", ""), grp.get("pw", ""), grp.get("name", ""),
+            grp.get("birth", ""), grp.get("gender", ""),
+            cafe_url, task.get("menu_id", ""), url, "", "",
+            _dt.now().strftime("%Y-%m-%d %H:%M:%S"), status, error
+        ]], sheet_name="결과값", log_fn=log_fn)
+
+    def _record_work_rows(self, worker_idx, nid, cafe_short, work_result, log_fn):
+        rows = work_result.get("result_rows", [])
+        if rows:
+            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] 결과시트 기록: {len(rows)}행")
+            from datetime import datetime as _dt
+            sheet_rows = []
+            for r in rows:
+                sheet_rows.append([
+                    r.get("id", ""), r.get("pw", ""), r.get("name", ""),
+                    r.get("birth", ""), r.get("gender", ""),
+                    r.get("cafe_url", ""), r.get("menu_id", ""),
+                    r.get("url", ""), r.get("deleted", "미확인"),
+                    r.get("manuscript", ""),
+                    _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    r.get("status", ""), r.get("error", ""),
+                ])
+            func.append_to_gsheet_with_color(sheet_rows, sheet_name="결과값", log_fn=log_fn)
+            for r in rows:
+                if r.get("status") == "성공":
+                    self.work_stats["reply_ok"] += 1
+                else:
+                    self.work_stats["reply_fail"] += 1
+            self.worker_update.emit(worker_idx, f"완료: {cafe_short}")
+        else:
+            self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: 작성된 글 없음")
 
 # 1순위: 카페 글쓰기 탭 (좌우 스플리터 구조 유지)
 # ─────────────────────────────────────────────
@@ -792,9 +887,26 @@ class CafeWriterTab(QWidget):
         self.manuscript_table.setColumnWidth(2, 50)
         self.manuscript_table.setMaximumHeight(180)
         self.manuscript_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.manuscript_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.manuscript_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.manuscript_table.setAlternatingRowColors(True)
+        self.manuscript_table.cellClicked.connect(self._on_manuscript_row_clicked)
+        self._selected_ms_rows = set()
         cg.addWidget(self.manuscript_table)
+
+        # 삭제 버튼
+        ms_btn_row = QHBoxLayout()
+        btn_del_ms = QPushButton("선택 원고 삭제")
+        btn_del_ms.setProperty("class", "danger")
+        btn_del_ms.setFixedWidth(120)
+        btn_del_ms.clicked.connect(self._delete_selected_manuscripts)
+        ms_btn_row.addWidget(btn_del_ms)
+        btn_select_all = QPushButton("전체 선택")
+        btn_select_all.setProperty("class", "secondary")
+        btn_select_all.setFixedWidth(80)
+        btn_select_all.clicked.connect(self._select_all_manuscripts)
+        ms_btn_row.addWidget(btn_select_all)
+        ms_btn_row.addStretch()
+        cg.addLayout(ms_btn_row)
 
         left_layout.addWidget(content_group)
 
@@ -1030,19 +1142,64 @@ class CafeWriterTab(QWidget):
             target.setText(path)
 
     def _browse_folder(self):
-        path = QFileDialog.getExistingDirectory(self, "원고 대폴더 선택")
+        path = QFileDialog.getExistingDirectory(self, "원고 폴더 선택 (여러 번 추가 가능)")
         if path:
             self.content_folder.setText(path)
-            # 소폴더 스캔 (랜덤 순서)
             items = func.get_manuscript_display_list(path)
-            self.manuscript_table.setRowCount(len(items))
-            for i, item in enumerate(items):
-                self.manuscript_table.setItem(i, 0, QTableWidgetItem(item["name"]))
-                self.manuscript_table.setItem(i, 1, QTableWidgetItem(str(item["txt_count"])))
-                self.manuscript_table.setItem(i, 2, QTableWidgetItem(str(item["img_count"])))
-                self.manuscript_table.setItem(i, 3, QTableWidgetItem(item["path"]))
-            self.lbl_content_count.setText(f"원고: {len(items)}개")
-            self._log(f"원고 폴더 로드: {len(items)}개 키워드 (랜덤 나열)")
+            for item in items:
+                row = self.manuscript_table.rowCount()
+                self.manuscript_table.insertRow(row)
+                self.manuscript_table.setItem(row, 0, QTableWidgetItem(item["name"]))
+                self.manuscript_table.setItem(row, 1, QTableWidgetItem(str(item["txt_count"])))
+                self.manuscript_table.setItem(row, 2, QTableWidgetItem(str(item["img_count"])))
+                self.manuscript_table.setItem(row, 3, QTableWidgetItem(item["path"]))
+            total = self.manuscript_table.rowCount()
+            self.lbl_content_count.setText(f"원고: {total}개")
+            self._log(f"원고 폴더 추가: {len(items)}개 → 총 {total}개")
+
+    def _delete_selected_manuscripts(self):
+        """선택된(연빨강) 원고 삭제."""
+        rows_to_delete = sorted(self._selected_ms_rows, reverse=True)
+        for r in rows_to_delete:
+            self.manuscript_table.removeRow(r)
+        self._selected_ms_rows.clear()
+        total = self.manuscript_table.rowCount()
+        self.lbl_content_count.setText(f"원고: {total}개")
+        if rows_to_delete:
+            self._log(f"원고 {len(rows_to_delete)}개 삭제 → 총 {total}개")
+
+    def _select_all_manuscripts(self):
+        """전체 선택/해제 토글."""
+        if len(self._selected_ms_rows) == self.manuscript_table.rowCount() and self.manuscript_table.rowCount() > 0:
+            # 전체 해제
+            self._selected_ms_rows.clear()
+            for r in range(self.manuscript_table.rowCount()):
+                color = QColor("#ffffff") if r % 2 == 0 else QColor("#f8f8fc")
+                for col in range(self.manuscript_table.columnCount()):
+                    cell = self.manuscript_table.item(r, col)
+                    if cell:
+                        cell.setBackground(color)
+        else:
+            # 전체 선택
+            for r in range(self.manuscript_table.rowCount()):
+                self._selected_ms_rows.add(r)
+                for col in range(self.manuscript_table.columnCount()):
+                    cell = self.manuscript_table.item(r, col)
+                    if cell:
+                        cell.setBackground(QColor("#f4cccc"))
+
+    def _on_manuscript_row_clicked(self, row, col):
+        """행 클릭 시 선택/해제 토글."""
+        if row in self._selected_ms_rows:
+            self._selected_ms_rows.discard(row)
+            color = QColor("#ffffff") if row % 2 == 0 else QColor("#f8f8fc")
+        else:
+            self._selected_ms_rows.add(row)
+            color = QColor("#f4cccc")
+        for c in range(self.manuscript_table.columnCount()):
+            cell = self.manuscript_table.item(row, c)
+            if cell:
+                cell.setBackground(color)
 
     def _log(self, msg):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -1057,7 +1214,7 @@ class CafeWriterTab(QWidget):
             self._log(f"구글시트 로드 실패: {str(e)}")
             QMessageBox.warning(self, "구글시트 오류", f"구글시트에서 계정을 불러올 수 없습니다.\n\n원인: {str(e)}")
             return
-        # accounts = [a for a in accounts if a["id"] == "ssnafatemm64654"]  # 테스트용 필터
+        accounts = [a for a in accounts if a["id"] in ("sinkkf", "towardsdp", "territorypy", "logicalnyw", "dniaoetied58418")]  # 테스트용 필터
         if not accounts:
             QMessageBox.warning(self, "알림", "구글시트에 계정 데이터가 없습니다. (A2행부터 입력)")
             return
@@ -1081,50 +1238,75 @@ class CafeWriterTab(QWidget):
 
         # 아이디별 그룹핑
         groups = func.group_accounts_by_id(accounts)
-        count = min(wc, len(groups), len(proxies))
 
         # 프록시 셔플
         import random
         random.shuffle(proxies)
 
-        self.worker_table.setRowCount(count)
-        for i in range(count):
-            grp = groups[i]
-            proxy = proxies[i]
-            # 첫 번째 작업의 카페 표시 (여러 개면 +N)
-            cafes = [t["cafe_url"].replace("https://cafe.naver.com/", "") for t in grp["tasks"] if t["cafe_url"]]
-            cafe_display = cafes[0] if cafes else "-"
-            if len(cafes) > 1:
-                cafe_display += f" +{len(cafes)-1}"
-            task_count = sum(t["post_count"] for t in grp["tasks"])
+        # 워커에 계정 분배 (라운드로빈)
+        num_workers = min(wc, len(groups))
+        worker_groups = [[] for _ in range(num_workers)]
+        for i, grp in enumerate(groups):
+            worker_groups[i % num_workers].append(grp)
 
-            self.worker_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-            self.worker_table.setItem(i, 1, QTableWidgetItem(grp["id"]))
-            self.worker_table.setItem(i, 2, QTableWidgetItem(proxy[:20]))
-            self.worker_table.setItem(i, 3, QTableWidgetItem(cafe_display))
-            self.worker_table.setItem(i, 4, QTableWidgetItem(f"{len(grp['tasks'])}개 작업"))
+        # 워커별 프록시 분배 (계정 수만큼)
+        proxy_idx = 0
+        worker_assignments = []
+        for w_idx in range(num_workers):
+            accs = worker_groups[w_idx]
+            w_proxies = []
+            for _ in range(len(accs)):
+                w_proxies.append(proxies[proxy_idx % len(proxies)])
+                proxy_idx += 1
+            worker_assignments.append({
+                "worker_idx": w_idx,
+                "accounts": accs,
+                "proxies": w_proxies,
+            })
+
+        # 워커 테이블 표시
+        self.worker_table.setRowCount(num_workers)
+        for w in worker_assignments:
+            w_idx = w["worker_idx"]
+            acc_ids = [a["id"] for a in w["accounts"]]
+            self.worker_table.setItem(w_idx, 0, QTableWidgetItem(str(w_idx + 1)))
+            self.worker_table.setItem(w_idx, 1, QTableWidgetItem(f"{acc_ids[0]} +{len(acc_ids)-1}" if len(acc_ids) > 1 else acc_ids[0] if acc_ids else "-"))
+            self.worker_table.setItem(w_idx, 2, QTableWidgetItem(w["proxies"][0][:20] if w["proxies"] else "-"))
+            self.worker_table.setItem(w_idx, 3, QTableWidgetItem(f"{len(acc_ids)}개 계정"))
+            self.worker_table.setItem(w_idx, 4, QTableWidgetItem(""))
             item = QTableWidgetItem("대기중")
             item.setForeground(QColor("#b08800"))
-            self.worker_table.setItem(i, 5, item)
+            self.worker_table.setItem(w_idx, 5, item)
 
-        self.lbl_summary.setText(f"성공 0 | 생년월일 0 | 핸드폰 0 | 영구정지 0 | 캡차 0 | 보안인증 0 | 실패 0 / 총 {count}개")
+        self.lbl_summary.setText(f"로그인: 대기 / 총 {len(groups)}개 계정 → {num_workers}개 워커")
 
-        self._log(f"작업 시작 — 계정 {len(accounts)}행 → {len(groups)}개 워커 / 프록시 {len(proxies)}개")
+        self._log(f"작업 시작 — 계정 {len(accounts)}행 → {len(groups)}개 그룹 → {num_workers}개 워커 / 프록시 {len(proxies)}개")
+        for w in worker_assignments:
+            acc_ids = [a["id"] for a in w["accounts"]]
+            self._log(f"워커#{w['worker_idx']+1} 배정: {acc_ids}")
 
-        # 원고 로드
-        ms_folder = self.content_folder.text().strip()
-        manuscripts = func.load_manuscripts(ms_folder) if ms_folder else []
+        # 원고 로드 (테이블에 있는 원고 경로 기반)
+        manuscripts = []
+        for r in range(self.manuscript_table.rowCount()):
+            path_item = self.manuscript_table.item(r, 3)
+            if path_item:
+                ms = func._parse_manuscript_folder(path_item.text())
+                if ms:
+                    manuscripts.append(ms)
         if not manuscripts:
             QMessageBox.warning(self, "알림", "원고 폴더를 선택하고 소폴더(키워드)가 있는지 확인해주세요.")
             self.btn_start.setEnabled(True)
             self.btn_pause.setEnabled(False)
             self.btn_stop.setEnabled(False)
             return
-        self._log(f"원고 {len(manuscripts)}개 로드 완료 (폴더명 순서)")
+        self._log(f"원고 {len(manuscripts)}개 로드 완료 (테이블 순서)")
 
         # 원고를 아이디별 작성수에 맞게 순차 배정
         ms_idx = 0
-        ms_assignments = {}  # {아이디: [원고1, 원고2, ...]}
+        ms_assignments = {}
+        total_needed = sum(sum(t.get("post_count", 1) for t in grp.get("tasks", [])) for grp in groups)
+        if total_needed > len(manuscripts):
+            self._log(f"⚠ 원고 부족: 필요 {total_needed}개 / 보유 {len(manuscripts)}개 — 원고 없는 계정은 작업 스킵됩니다")
         for grp in groups:
             nid = grp["id"]
             total_posts = sum(t.get("post_count", 1) for t in grp.get("tasks", []))
@@ -1134,7 +1316,10 @@ class CafeWriterTab(QWidget):
                     assigned.append(manuscripts[ms_idx])
                     ms_idx += 1
             ms_assignments[nid] = assigned
-            self._log(f"원고 배정: {nid} → {[m['name'] for m in assigned]}")
+            if assigned:
+                self._log(f"원고 배정: {nid} → {[m['name'] for m in assigned]}")
+            else:
+                self._log(f"⚠ 원고 배정: {nid} → 없음 (원고 소진)")
 
         # 설정 수집
         settings = {
@@ -1157,7 +1342,7 @@ class CafeWriterTab(QWidget):
         }
 
         # 워커 스레드 시작
-        self._worker_thread = LoginWorkerThread(groups, proxies, count, settings)
+        self._worker_thread = LoginWorkerThread(worker_assignments, proxies, settings)
         self._worker_thread.log_signal.connect(self._log)
         self._worker_thread.worker_update.connect(self._update_worker_table)
         self._worker_thread.finished_signal.connect(self._on_finished)
