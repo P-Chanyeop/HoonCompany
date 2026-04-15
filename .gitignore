@@ -17,3 +17,5 @@ dist/
 *.exe
 *.json
 test_*.py
+
+미사용원고_*/
