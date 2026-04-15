@@ -1199,9 +1199,13 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
     _log = log_fn or (lambda msg: logger.info(msg))
     empty = {"my_grade": -1, "my_grade_text": "", "grades": {}}
     try:
-        driver.get(cafe_url)
-        time.sleep(1.5)
-        dismiss_alert(driver)
+        # 이미 카페에 있으면 재접속 안 함
+        cafe_short = cafe_url.rstrip("/").split("/")[-1]
+        current = driver.current_url or ""
+        if cafe_short not in current:
+            driver.get(cafe_url)
+            time.sleep(1)
+            dismiss_alert(driver)
 
         # clubid 추출
         club_id = None
@@ -1262,10 +1266,10 @@ def get_cafe_grades(driver, cafe_url, log_fn=None):
 def _close_cafe_popups(driver):
     """카페 접속 시 뜨는 팝업(가입 환영 등) 닫기."""
     try:
+        driver.implicitly_wait(0.5)
         close_selectors = [
             "button.btn_close", "a.btn_close", ".popup_close",
             "button[class*='close']", "a[class*='close']",
-            "button[title='닫기']", "a[title='닫기']",
         ]
         for sel in close_selectors:
             btns = driver.find_elements(By.CSS_SELECTOR, sel)
@@ -1273,18 +1277,16 @@ def _close_cafe_popups(driver):
                 try:
                     if btn.is_displayed():
                         btn.click()
-                        time.sleep(0.2)
+                        time.sleep(0.1)
                 except:
                     continue
-        for btn in driver.find_elements(By.CSS_SELECTOR, "button, a"):
-            try:
-                if btn.text.strip() == "닫기" and btn.is_displayed():
-                    btn.click()
-                    time.sleep(0.2)
-            except:
-                continue
     except:
         pass
+    finally:
+        try:
+            driver.implicitly_wait(5)
+        except:
+            pass
 
 
 def visit_cafe(driver, account, log_fn=None):
@@ -1637,15 +1639,35 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
                 file_input = driver.find_elements(By.CSS_SELECTOR, "input#hidden-file, input[type='file'][accept*='.jpg']")
                 if file_input:
                     file_input[0].send_keys("\n".join(os.path.abspath(p) for p in paths))
-                    time.sleep(1.5)
-                    # 슬라이드 버튼 클릭
-                    slide_btn = WebDriverWait(driver, 5).until(
-                        EC.element_to_be_clickable((By.CSS_SELECTOR, "#image-type-collage"))
-                    )
-                    slide_btn.click()
                     time.sleep(1)
-                    img_count += len(paths)
-                    _log(f"슬라이드 업로드 {len(paths)}장")
+                    # 열기 창 닫기
+                    _close_file_dialog()
+                    time.sleep(1)
+                    # 콜라주 버튼 클릭 (JS)
+                    try:
+                        WebDriverWait(driver, 5).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, "#image-type-collage"))
+                        )
+                        driver.execute_script("document.querySelector('#image-type-collage').click()")
+                        time.sleep(1)
+                        img_count += len(paths)
+                        _log(f"슬라이드 업로드 {len(paths)}장")
+                    except:
+                        _log("❌ 콜라주 버튼 못 찾음 — 일반 삽입 시도")
+                        try:
+                            driver.execute_script("var b=document.querySelector('#image-type-default');if(b)b.click();")
+                        except:
+                            pass
+                        time.sleep(0.5)
+                    # 파일 전송 에러 팝업 체크
+                    try:
+                        err_popup = driver.find_elements(By.CSS_SELECTOR, "button.se-popup-button-confirm")
+                        if err_popup and err_popup[0].is_displayed():
+                            err_popup[0].click()
+                            _log("⚠ 파일 전송 오류 팝업 닫음")
+                            time.sleep(0.5)
+                    except:
+                        pass
                 else:
                     _log("❌ 이미지 업로드 input 못 찾음")
 
@@ -1811,14 +1833,33 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
                 file_input = driver.find_elements(By.CSS_SELECTOR, "input#hidden-file, input[type='file'][accept*='.jpg']")
                 if file_input:
                     file_input[0].send_keys("\n".join(os.path.abspath(p) for p in paths))
-                    time.sleep(1.5)
-                    slide_btn = WebDriverWait(driver, 5).until(
-                        EC.element_to_be_clickable((By.CSS_SELECTOR, "#image-type-collage"))
-                    )
-                    slide_btn.click()
                     time.sleep(1)
-                    img_count += len(paths)
-                    _log(f"슬라이드 업로드 {len(paths)}장")
+                    _close_file_dialog()
+                    time.sleep(1)
+                    try:
+                        WebDriverWait(driver, 5).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, "#image-type-collage"))
+                        )
+                        driver.execute_script("document.querySelector('#image-type-collage').click()")
+                        time.sleep(1)
+                        img_count += len(paths)
+                        _log(f"슬라이드 업로드 {len(paths)}장")
+                    except:
+                        _log("❌ 콜라주 버튼 못 찾음 — 일반 삽입 시도")
+                        try:
+                            driver.execute_script("var b=document.querySelector('#image-type-default');if(b)b.click();")
+                        except:
+                            pass
+                        time.sleep(0.5)
+                    # 파일 전송 에러 팝업 체크
+                    try:
+                        err_popup = driver.find_elements(By.CSS_SELECTOR, "button.se-popup-button-confirm")
+                        if err_popup and err_popup[0].is_displayed():
+                            err_popup[0].click()
+                            _log("⚠ 파일 전송 오류 팝업 닫음")
+                            time.sleep(0.5)
+                    except:
+                        pass
                 else:
                     _log("❌ 이미지 업로드 input 못 찾음")
 
@@ -1860,6 +1901,34 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
     except Exception as e:
         _log(f"❌ 글쓰기 예외: {str(e)[:60]}")
         return {"ok": False, "url": "", "msg": str(e)[:60]}
+
+
+def _close_file_dialog():
+    """Windows 파일 열기 대화상자 닫기."""
+    try:
+        import ctypes
+        import ctypes.wintypes
+
+        EnumWindows = ctypes.windll.user32.EnumWindows
+        GetWindowTextW = ctypes.windll.user32.GetWindowTextW
+        GetClassNameW = ctypes.windll.user32.GetClassNameW
+        PostMessageW = ctypes.windll.user32.PostMessageW
+        WM_CLOSE = 0x0010
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+        def callback(hwnd, lparam):
+            class_name = ctypes.create_unicode_buffer(256)
+            GetClassNameW(hwnd, class_name, 256)
+            title = ctypes.create_unicode_buffer(256)
+            GetWindowTextW(hwnd, title, 256)
+            # #32770 = Windows 파일 대화상자 클래스
+            if class_name.value == "#32770" or "열기" in title.value or "Open" in title.value:
+                PostMessageW(hwnd, WM_CLOSE, 0, 0)
+            return True
+
+        EnumWindows(callback, 0)
+    except:
+        pass
 
 
 def _input_tags(driver, tags, _log):
@@ -2123,6 +2192,11 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
                 _log(f"답글 작성 시도: [{article['title'][:30]}] article_id={article['article_id']} 등급={article.get('author_grade', '') or '탈퇴회원'} 닉={article.get('author_nick', '')}")
                 result = write_reply(driver, cafe_url, article["article_id"], reply_title, processed, post_options, reply_tags, _log)
 
+                # 실패 시 1회 재시도
+                if not result.get("ok"):
+                    _log(f"❌ 답글 작성 실패 — 1회 재시도")
+                    result = write_reply(driver, cafe_url, article["article_id"], reply_title, processed, post_options, reply_tags, _log)
+
                 if result.get("ok"):
                     reply_written += 1
                     written += 1
@@ -2136,10 +2210,12 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
                     _log(f"딜레이 {delay}초 대기...")
                     time.sleep(delay)
                 else:
-                    _log(f"❌ 답글 작성 실패: article_id={article['article_id']}")
+                    _log(f"❌ 답글 작성 실패 (재시도 포함): article_id={article['article_id']}")
                     _cleanup_temp_images(processed)
                     ms_name = ms['name'] if manuscripts else ""
                     result_rows.append({**row_base, "cafe_url": cafe_url, "menu_id": menu_id, "url": "", "deleted": "", "manuscript": ms_name, "status": "실패", "error": result.get('error', '') or "작성실패"})
+                    reply_written += 1
+                    written += 1
                     # 활동정지면 즉시 종료
                     if result.get("error") == "suspended":
                         _log("활동정지 감지 — 카페 작업 중단")
