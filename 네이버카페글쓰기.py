@@ -761,10 +761,11 @@ class LoginWorkerThread(QThread):
                     self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short}: {work_result['msg']}")
 
                     if work_result.get("error") == "suspended":
-                        self.worker_update.emit(worker_idx, f"활동정지: {nid}")
+                        self.worker_update.emit(worker_idx, f"활동정지: {nid} ({cafe_short})")
                         self.work_stats["suspended"] += 1
-                        self._record_result(grp, cafe_url, task, "", "실패", "활동정지", log_fn)
-                        break
+                        self._record_result(grp, cafe_url, task, "", "실패", f"활동정지({cafe_short})", log_fn)
+                        self.log_signal.emit(f"워커#{worker_idx+1} [{nid}] {cafe_short} 활동정지 → 다음 카페로 진행")
+                        continue
 
                     self._record_work_rows(worker_idx, nid, cafe_short, work_result, log_fn)
                     for r in work_result.get("result_rows", []):

@@ -429,11 +429,29 @@ def _fill_nickname(driver, nickname, _log):
 
         import random as _rand
 
-        # 닉네임이 없으면 기본값 생성
-        base_nick = nickname or f"user{_rand.randint(1000, 9999)}"
+        # 닉네임이 없으면 한글 랜덤 생성 (숫자 없이 순수 한글만)
+        if not nickname:
+            _adj = [
+                "행복한","귀여운","맑은","따뜻한","빛나는","즐거운","상큼한","포근한","활기찬","싱그러운",
+                "달콤한","소중한","반짝이는","사랑스런","건강한","설레는","편안한","든든한","깜찍한","고운",
+                "푸른","밝은","착한","예쁜","멋진","씩씩한","용감한","지혜로운","넉넉한","다정한",
+                "기운찬","산뜻한","화사한","청량한","아늑한","정겨운","유쾌한","명랑한","온화한","단아한",
+                "영롱한","찬란한","눈부신","향기로운","그윽한","잔잔한","평화로운","자유로운","순수한","청초한",
+                "기특한","야무진","당찬","늠름한","의젓한","듬직한","알뜰한","꼼꼼한","슬기로운","재빠른",
+            ]
+            _noun = [
+                "하늘","바다","구름","별빛","햇살","나비","토끼","고양이","다람쥐","꽃잎",
+                "민들레","수달","참새","여우","강아지","해바라기","무지개","은하수","달빛","새벽",
+                "노을","산들바람","이슬","동백","목련","라일락","벚꽃","진달래","개나리","코스모스",
+                "소나무","단풍","은행잎","클로버","풀잎","연꽃","장미","튤립","수선화","안개꽃",
+                "호수","시냇물","폭포","오솔길","들판","초원","숲속","언덕","봄날","여름밤",
+                "가을빛","겨울별","아침","저녁놀","보름달","샛별","미르","도담","가온","나래",
+            ]
+            nickname = _rand.choice(_adj) + _rand.choice(_noun)
+        base_nick = nickname
 
         for try_i in range(5):
-            current_nick = base_nick if try_i == 0 else f"{base_nick}{_rand.randint(10, 999)}"
+            current_nick = base_nick if try_i == 0 else _rand.choice(_adj) + _rand.choice(_noun)
             nick_input[0].clear()
             time.sleep(0.1)
             nick_input[0].send_keys(current_nick)
@@ -593,9 +611,6 @@ def _solve_captcha(driver, _log, max_attempts=3):
                 return True
 
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", img_el[0])
-            # 브라우저 포커싱 (2Captcha가 포커스 없으면 동작 안 할 수 있음)
-            driver.switch_to.window(driver.current_window_handle)
-            driver.execute_script("window.focus();")
             time.sleep(0.3)
 
             # 이미지 다운로드

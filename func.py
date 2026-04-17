@@ -1005,6 +1005,21 @@ def _solve_birthday(driver, account, _log):
             # 자동입력 방지 (최대 3회)
             captcha_passed = False
             for try_i in range(3):
+                # 캡챠 재시도 시 비밀번호 재입력 (첫 시도 제외)
+                if try_i > 0:
+                    pw_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='password']")
+                    if len(pw_inputs) >= 2:
+                        pw_inputs[0].click()
+                        time.sleep(0.1)
+                        pw_inputs[0].send_keys(Keys.CONTROL, "a")
+                        slow_type(pw_inputs[0], new_pw)
+                        time.sleep(0.2)
+                        pw_inputs[1].click()
+                        time.sleep(0.1)
+                        pw_inputs[1].send_keys(Keys.CONTROL, "a")
+                        slow_type(pw_inputs[1], new_pw)
+                        time.sleep(0.2)
+                        _log(f"비밀번호 재입력 완료 ({try_i+1}/3)")
                 if _solve_text_captcha(driver, _log):
                     for btn in driver.find_elements(By.CSS_SELECTOR, "button, a, input[type='submit']"):
                         try:
@@ -1155,27 +1170,72 @@ def _solve_receipt_captcha(driver, account, gemini_key, _log):
 
 
 def _solve_text_captcha(driver, _log):
-    gemini_key = get_gemini_key()
-    if not gemini_key:
+    # ── Gemini 대신 2Captcha로 보호조치 캡차 해제 ──
+    # gemini_key = get_gemini_key()
+    # if not gemini_key:
+    #     return False
+    api_key = get_2captcha_key()
+    if not api_key:
+        _log("2Captcha API 키 없음 — 캡차 해제 불가")
         return False
     try:
         captcha_imgs = driver.find_elements(By.CSS_SELECTOR, "img[src*='captcha'], img.captcha_img, #captchaimg")
         if not captcha_imgs:
             return False
 
-        img_b64 = captcha_imgs[0].screenshot_as_base64
-        genai.configure(api_key=gemini_key)
-        model = genai.GenerativeModel("gemini-2.5-pro")
+        # 이미지 데이터 수집
+        img_data = None
+        img_src = captcha_imgs[0].get_attribute("src") or ""
+        if img_src.startswith("http"):
+            try:
+                import urllib.request as _ur, tempfile as _tf
+                fd, tmp = _tf.mkstemp(suffix=".png")
+                os.close(fd)
+                _ur.urlretrieve(img_src, tmp)
+                with open(tmp, "rb") as f:
+                    img_data = f.read()
+                os.remove(tmp)
+            except:
+                pass
+        if not img_data:
+            img_data = base64.b64decode(captcha_imgs[0].screenshot_as_base64)
 
-        import PIL.Image, io
-        img = PIL.Image.open(io.BytesIO(base64.b64decode(img_b64)))
+        # 2Captcha API 호출
+        import json as _json, urllib.request as _ureq, urllib.parse as _uparse
+        img_b64 = base64.b64encode(img_data).decode()
+        payload = _uparse.urlencode({
+            "key": api_key, "method": "base64", "body": img_b64, "json": 1,
+        }).encode()
+        req = _ureq.Request("http://2captcha.com/in.php", data=payload)
+        with _ureq.urlopen(req, timeout=30) as resp:
+            result = _json.loads(resp.read().decode())
+        if result.get("status") != 1:
+            _log(f"2Captcha 제출 실패: {result.get('request', '')}")
+            return False
+        task_id = result["request"]
+        _log(f"2Captcha 제출 완료: task_id={task_id}")
 
-        prompt = """이 이미지에 보이는 텍스트/문자를 정확히 읽어주세요.
-왜곡된 글자입니다. 보이는 영문자와 숫자만 정확히 답해주세요. 설명 없이 문자만."""
+        # 결과 폴링 (최대 60초)
+        answer = None
+        for _ in range(12):
+            time.sleep(5)
+            poll_url = f"http://2captcha.com/res.php?key={api_key}&action=get&id={task_id}&json=1"
+            with _ureq.urlopen(poll_url, timeout=10) as resp2:
+                result2 = _json.loads(resp2.read().decode())
+            if result2.get("status") == 1:
+                answer = result2["request"]
+                break
+            elif result2.get("request") == "CAPCHA_NOT_READY":
+                continue
+            else:
+                _log(f"2Captcha 에러: {result2.get('request', '')}")
+                return False
+        if not answer:
+            _log("2Captcha 타임아웃")
+            return False
 
-        response = model.generate_content([prompt, img])
-        answer = re.sub(r'[^a-zA-Z0-9]', '', response.text.strip())
-        _log(f"캡차 문자 인식: {answer}")
+        answer = re.sub(r'[^a-zA-Z0-9]', '', answer.strip())
+        _log(f"2Captcha 캡차 인식: {answer}")
 
         captcha_input = driver.find_elements(By.CSS_SELECTOR, "#autoValue")
         if not captcha_input:
@@ -1186,7 +1246,7 @@ def _solve_text_captcha(driver, _log):
             slow_type(captcha_input[0], answer)
             return True
     except Exception as e:
-        _log(f"텍스트 캡차 실패: {str(e)[:60]}")
+        _log(f"2Captcha 텍스트 캡차 실패: {str(e)[:60]}")
     return False
 
 
@@ -1529,13 +1589,27 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
         if not reply_btn:
             _log("❌ 답글 버튼 못 찾음 — 이 글은 답글 불가")
             driver.switch_to.default_content()
-            return {"ok": False, "url": ""}
+            return {"ok": False, "url": "", "error": "답글버튼없음", "msg": "답글 버튼 못 찾음"}
 
         # 답글 버튼의 href에서 에디터 URL 추출 또는 직접 클릭
         reply_href = reply_btn.get_attribute("href") or ""
         _log(f"답글 버튼 발견 — 클릭")
         reply_btn.click()
         time.sleep(1.5)
+
+        # 답글 버튼 클릭 직후 활동정지 alert 체크
+        try:
+            from selenium.webdriver.common.alert import Alert as _Alert
+            alert = _Alert(driver)
+            alert_text = alert.text
+            if "활동정지" in alert_text or "활동 정지" in alert_text:
+                alert.accept()
+                _log(f"❌ 활동정지 상태: {alert_text[:50]}")
+                return {"ok": False, "url": "", "error": "suspended", "msg": f"활동정지: {alert_text[:50]}"}
+            alert.accept()
+        except:
+            pass
+
         driver.switch_to.default_content()
 
         # 에디터 페이지로 전환됨 (새 탭이 열릴 수도 있음)
@@ -1557,7 +1631,7 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
                 if len(driver.window_handles) > 1:
                     driver.close()
                     driver.switch_to.window(driver.window_handles[0])
-                return {"ok": False, "url": "", "error": "suspended"}
+                return {"ok": False, "url": "", "error": "suspended", "msg": f"활동정지: {alert_text[:50]}"}
             alert.accept()
         except:
             pass  # alert 없으면 정상
@@ -1643,17 +1717,17 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
                     # 열기 창 닫기
                     _close_file_dialog()
                     time.sleep(1)
-                    # 콜라주 버튼 클릭 (JS)
+                    # 슬라이드 버튼 클릭 (JS)
                     try:
                         WebDriverWait(driver, 5).until(
-                            EC.presence_of_element_located((By.CSS_SELECTOR, "#image-type-collage"))
+                            EC.presence_of_element_located((By.CSS_SELECTOR, "#image-type-slide"))
                         )
-                        driver.execute_script("document.querySelector('#image-type-collage').click()")
+                        driver.execute_script("document.querySelector('#image-type-slide').click()")
                         time.sleep(1)
                         img_count += len(paths)
                         _log(f"슬라이드 업로드 {len(paths)}장")
                     except:
-                        _log("❌ 콜라주 버튼 못 찾음 — 일반 삽입 시도")
+                        _log("❌ 슬라이드 버튼 못 찾음 — 일반 삽입 시도")
                         try:
                             driver.execute_script("var b=document.querySelector('#image-type-default');if(b)b.click();")
                         except:
@@ -1687,7 +1761,10 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
             try:
                 if "등록" in btn.text.strip():
                     _log(f"등록 버튼 클릭: [{btn.text.strip()}]")
-                    btn.click()
+                    try:
+                        btn.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", btn)
                     time.sleep(2)
                     clicked = True
                     break
@@ -1699,7 +1776,7 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
             if len(driver.window_handles) > 1:
                 driver.close()
                 driver.switch_to.window(driver.window_handles[0])
-            return {"ok": False, "url": ""}
+            return {"ok": False, "url": "", "error": "등록버튼없음", "msg": "등록 버튼 못 찾음"}
 
         dismiss_alert(driver)
         post_url = driver.current_url
@@ -1710,10 +1787,49 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
             driver.close()
             driver.switch_to.window(driver.window_handles[0])
 
+        # iframe 전환 후 URL 복사 버튼 클릭
+        try:
+            time.sleep(2)
+            iframe = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "iframe#cafe_main"))
+            )
+            driver.switch_to.frame(iframe)
+            url_btn = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "a.button_url"))
+            )
+            with _clipboard_lock:
+                url_btn.click()
+                time.sleep(0.5)
+                clipboard_url = pyperclip.paste()
+            if clipboard_url and clipboard_url.startswith("http"):
+                post_url = clipboard_url
+                _log(f"URL 복사 완료: {post_url[:60]}")
+            else:
+                _log(f"URL 복사 버튼 클릭했으나 클립보드 값 이상: {clipboard_url[:40] if clipboard_url else '(빈값)'}")
+            driver.switch_to.default_content()
+        except Exception as url_e:
+            _log(f"URL 복사 버튼 클릭 실패: {str(url_e)[:40]}")
+            try:
+                driver.switch_to.default_content()
+            except:
+                pass
+
         return {"ok": True, "url": post_url}
 
     except Exception as e:
-        _log(f"❌ 답글 작성 예외: {str(e)[:60]}")
+        err_str = str(e)[:80]
+        _log(f"❌ 답글 작성 예외: {err_str}")
+        # 상세 에러 분류
+        if "timeout" in err_str.lower() or "Timed out" in err_str:
+            error_type = "타임아웃"
+        elif "invalid session" in err_str.lower():
+            error_type = "세션만료"
+        elif "no such window" in err_str.lower():
+            error_type = "창닫힘"
+        elif "활동정지" in err_str or "활동 정지" in err_str:
+            error_type = "활동정지"
+        else:
+            error_type = f"예외: {err_str[:40]}"
         try:
             if len(driver.window_handles) > 1:
                 driver.close()
@@ -1722,7 +1838,7 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
                 driver.switch_to.default_content()
         except:
             pass
-        return {"ok": False, "url": ""}
+        return {"ok": False, "url": "", "error": error_type, "msg": error_type}
 
 
 # ═══════════════════════════════════════════════
@@ -1775,7 +1891,7 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
             _log(f"제목 입력 완료: {title[:30]}")
         else:
             _log("❌ 제목 입력 영역 못 찾음")
-            return {"ok": False, "url": "", "msg": "제목 입력 실패"}
+            return {"ok": False, "url": "", "msg": "제목 입력 실패", "error": "제목입력실패"}
 
         # 본문 영역 클릭
         _log("본문 영역 탐색...")
@@ -1838,14 +1954,14 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
                     time.sleep(1)
                     try:
                         WebDriverWait(driver, 5).until(
-                            EC.presence_of_element_located((By.CSS_SELECTOR, "#image-type-collage"))
+                            EC.presence_of_element_located((By.CSS_SELECTOR, "#image-type-slide"))
                         )
-                        driver.execute_script("document.querySelector('#image-type-collage').click()")
+                        driver.execute_script("document.querySelector('#image-type-slide').click()")
                         time.sleep(1)
                         img_count += len(paths)
                         _log(f"슬라이드 업로드 {len(paths)}장")
                     except:
-                        _log("❌ 콜라주 버튼 못 찾음 — 일반 삽입 시도")
+                        _log("❌ 슬라이드 버튼 못 찾음 — 일반 삽입 시도")
                         try:
                             driver.execute_script("var b=document.querySelector('#image-type-default');if(b)b.click();")
                         except:
@@ -1882,7 +1998,10 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
                 txt = btn.text.strip()
                 if "등록" in txt or "작성" in txt:
                     _log(f"등록 버튼 클릭: [{txt}]")
-                    btn.click()
+                    try:
+                        btn.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", btn)
                     time.sleep(1.5)
                     clicked = True
                     break
@@ -1891,7 +2010,7 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
 
         if not clicked:
             _log("❌ 등록 버튼 못 찾음")
-            return {"ok": False, "url": "", "msg": "등록 버튼 없음"}
+            return {"ok": False, "url": "", "msg": "등록 버튼 없음", "error": "등록버튼없음"}
 
         dismiss_alert(driver)
         post_url = driver.current_url
@@ -1899,8 +2018,17 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
         return {"ok": True, "url": post_url, "msg": "글쓰기 성공"}
 
     except Exception as e:
-        _log(f"❌ 글쓰기 예외: {str(e)[:60]}")
-        return {"ok": False, "url": "", "msg": str(e)[:60]}
+        err_str = str(e)[:80]
+        _log(f"❌ 글쓰기 예외: {err_str}")
+        if "timeout" in err_str.lower() or "Timed out" in err_str:
+            error_type = "타임아웃"
+        elif "invalid session" in err_str.lower():
+            error_type = "세션만료"
+        elif "no such window" in err_str.lower():
+            error_type = "창닫힘"
+        else:
+            error_type = f"예외: {err_str[:40]}"
+        return {"ok": False, "url": "", "msg": error_type, "error": error_type}
 
 
 def _close_file_dialog():
@@ -1932,7 +2060,25 @@ def _close_file_dialog():
 
 
 def _input_tags(driver, tags, _log):
-    """에디터에서 태그 입력. input.tag_input에 하나씩 입력 + Enter."""
+    """에디터에서 태그 입력. 기존 태그 모두 삭제 후 새 태그 입력."""
+    try:
+        # 기존 태그 삭제 (input focus 후 Backspace)
+        removed = driver.execute_script("""
+            var input = document.querySelector('.tag_input');
+            var items = document.querySelectorAll('.WritingTag .item');
+            if(input && items.length > 0){
+                input.focus();
+                for(var i=0; i<items.length; i++){
+                    input.dispatchEvent(new KeyboardEvent('keydown',{key:'Backspace',code:'Backspace',keyCode:8,bubbles:true}));
+                }
+            }
+            return items.length;
+        """)
+        if removed:
+            time.sleep(0.3)
+            _log(f"기존 태그 {removed}개 삭제")
+    except Exception as e:
+        _log(f"기존 태그 삭제 중 오류: {str(e)[:40]}")
     if not tags:
         return
     try:
@@ -1940,8 +2086,11 @@ def _input_tags(driver, tags, _log):
         if not tag_input:
             _log("⚠ 태그 입력 영역 못 찾음")
             return
-        for i, tag in enumerate(tags[:10]):  # 최대 10개
-            tag_input[0].click()
+        for i, tag in enumerate(tags[:10]):
+            try:
+                tag_input[0].click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", tag_input[0])
             time.sleep(0.1)
             tag_input[0].clear()
             tag_input[0].send_keys(tag)
@@ -1965,11 +2114,17 @@ def _set_post_options(driver, options, _log):
     want_search = options.get("allow_search", True)
     want_comment = options.get("allow_comment", True)
 
+    def _safe_click(el):
+        try:
+            el.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", el)
+
     try:
         # 1. 공개설정 버튼 클릭
         open_btn = driver.find_elements(By.CSS_SELECTOR, "button.btn_open_set")
         if open_btn:
-            open_btn[0].click()
+            _safe_click(open_btn[0])
             time.sleep(0.3)
             _log("공개설정 패널 열기")
 
@@ -1977,13 +2132,13 @@ def _set_post_options(driver, options, _log):
         if want_public:
             radio = driver.find_elements(By.CSS_SELECTOR, "input#all[name='public']")
             if radio and not radio[0].is_selected():
-                driver.find_element(By.CSS_SELECTOR, "label[for='all']").click()
+                _safe_click(driver.find_element(By.CSS_SELECTOR, "label[for='all']"))
                 time.sleep(0.2)
             _log("전체공개 선택")
         else:
             radio = driver.find_elements(By.CSS_SELECTOR, "input#member[name='public']")
             if radio and not radio[0].is_selected():
-                driver.find_element(By.CSS_SELECTOR, "label[for='member']").click()
+                _safe_click(driver.find_element(By.CSS_SELECTOR, "label[for='member']"))
                 time.sleep(0.2)
             _log("멤버공개 선택")
 
@@ -1992,11 +2147,11 @@ def _set_post_options(driver, options, _log):
             if search_cb:
                 is_checked = search_cb[0].is_selected()
                 if want_search and not is_checked:
-                    driver.find_element(By.CSS_SELECTOR, "label[for='permit']").click()
+                    _safe_click(driver.find_element(By.CSS_SELECTOR, "label[for='permit']"))
                     time.sleep(0.2)
                     _log("검색허용 체크")
                 elif not want_search and is_checked:
-                    driver.find_element(By.CSS_SELECTOR, "label[for='permit']").click()
+                    _safe_click(driver.find_element(By.CSS_SELECTOR, "label[for='permit']"))
                     time.sleep(0.2)
                     _log("검색허용 해제")
 
@@ -2005,11 +2160,11 @@ def _set_post_options(driver, options, _log):
         if comment_cb:
             is_checked = comment_cb[0].is_selected()
             if want_comment and not is_checked:
-                driver.find_element(By.CSS_SELECTOR, "label[for='coment']").click()
+                _safe_click(driver.find_element(By.CSS_SELECTOR, "label[for='coment']"))
                 time.sleep(0.2)
                 _log("댓글허용 체크")
             elif not want_comment and is_checked:
-                driver.find_element(By.CSS_SELECTOR, "label[for='coment']").click()
+                _safe_click(driver.find_element(By.CSS_SELECTOR, "label[for='coment']"))
                 time.sleep(0.2)
                 _log("댓글허용 해제")
 
