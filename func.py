@@ -1591,46 +1591,32 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
             driver.switch_to.default_content()
             return {"ok": False, "url": "", "error": "답글버튼없음", "msg": "답글 버튼 못 찾음"}
 
-        # 답글 버튼의 href에서 에디터 URL 추출 또는 직접 클릭
+        # 답글 버튼의 href에서 에디터 URL 추출
         reply_href = reply_btn.get_attribute("href") or ""
         _log(f"답글 버튼 발견 — 클릭")
-        reply_btn.click()
-        time.sleep(1.5)
 
-        # 답글 버튼 클릭 직후 활동정지 alert 체크
+        # href가 있으면 현재 탭에서 직접 이동 (새 탭 열면 alert이 CDP 전체를 블로킹)
+        if reply_href:
+            driver.switch_to.default_content()
+            driver.get(reply_href)
+            time.sleep(1.5)
+        else:
+            # href 없으면 클릭 폴백
+            reply_btn.click()
+            time.sleep(1.5)
+            driver.switch_to.default_content()
+            if len(driver.window_handles) > 1:
+                driver.switch_to.window(driver.window_handles[-1])
+                _log("새 탭으로 전환")
+                time.sleep(1)
+
+        # 활동정지 alert 체크 (현재 탭에서 뜨므로 switch_to.alert 정상 작동)
         try:
-            from selenium.webdriver.common.alert import Alert as _Alert
-            alert = _Alert(driver)
+            alert = driver.switch_to.alert
             alert_text = alert.text
             if "활동정지" in alert_text or "활동 정지" in alert_text:
                 alert.accept()
                 _log(f"❌ 활동정지 상태: {alert_text[:50]}")
-                return {"ok": False, "url": "", "error": "suspended", "msg": f"활동정지: {alert_text[:50]}"}
-            alert.accept()
-        except:
-            pass
-
-        driver.switch_to.default_content()
-
-        # 에디터 페이지로 전환됨 (새 탭이 열릴 수도 있음)
-        # 탭이 여러 개면 마지막 탭으로 전환
-        if len(driver.window_handles) > 1:
-            driver.switch_to.window(driver.window_handles[-1])
-            _log("새 탭으로 전환")
-            time.sleep(1)
-
-        # 에디터 로드 대기
-        # 활동정지 alert 체크
-        try:
-            from selenium.webdriver.common.alert import Alert as _Alert
-            alert = _Alert(driver)
-            alert_text = alert.text
-            if "활동정지" in alert_text or "활동 정지" in alert_text:
-                alert.accept()
-                _log(f"❌ 활동정지 상태: {alert_text[:50]}")
-                if len(driver.window_handles) > 1:
-                    driver.close()
-                    driver.switch_to.window(driver.window_handles[0])
                 return {"ok": False, "url": "", "error": "suspended", "msg": f"활동정지: {alert_text[:50]}"}
             alert.accept()
         except:
@@ -1787,16 +1773,23 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
             driver.close()
             driver.switch_to.window(driver.window_handles[0])
 
-        # iframe 전환 후 URL 복사 버튼 클릭
+        # URL 복사 버튼으로 정확한 URL 가져오기
         try:
             time.sleep(2)
-            iframe = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "iframe#cafe_main"))
-            )
-            driver.switch_to.frame(iframe)
-            url_btn = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, "a.button_url"))
-            )
+            url_btn = None
+            # 먼저 iframe 없이 직접 탐색 (ca-fe 경로 에디터 → 등록 후 직접 페이지)
+            url_btn_list = driver.find_elements(By.CSS_SELECTOR, "a.button_url")
+            if url_btn_list and url_btn_list[0].is_displayed():
+                url_btn = url_btn_list[0]
+            else:
+                # iframe 구조일 경우
+                iframe = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "iframe#cafe_main"))
+                )
+                driver.switch_to.frame(iframe)
+                url_btn = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, "a.button_url"))
+                )
             with _clipboard_lock:
                 url_btn.click()
                 time.sleep(0.5)
@@ -1873,7 +1866,18 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
         _log(f"에디터 접속: {editor_url}")
         driver.get(editor_url)
         time.sleep(1.5)
-        dismiss_alert(driver)
+
+        # 활동정지 alert 체크
+        try:
+            alert = driver.switch_to.alert
+            alert_text = alert.text
+            if "활동정지" in alert_text or "활동 정지" in alert_text:
+                alert.accept()
+                _log(f"❌ 활동정지 상태: {alert_text[:50]}")
+                return {"ok": False, "url": "", "error": "suspended", "msg": f"활동정지: {alert_text[:50]}"}
+            alert.accept()
+        except:
+            pass
 
         # 제목 입력
         _log("제목 입력 영역 탐색...")
@@ -2015,6 +2019,34 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
         dismiss_alert(driver)
         post_url = driver.current_url
         _log(f"글쓰기 등록 완료 — URL: {post_url[:60]}")
+
+        # URL 복사 버튼으로 정확한 URL 가져오기
+        try:
+            time.sleep(2)
+            iframe = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "iframe#cafe_main"))
+            )
+            driver.switch_to.frame(iframe)
+            url_btn = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "a.button_url"))
+            )
+            with _clipboard_lock:
+                url_btn.click()
+                time.sleep(0.5)
+                clipboard_url = pyperclip.paste()
+            if clipboard_url and clipboard_url.startswith("http"):
+                post_url = clipboard_url
+                _log(f"URL 복사 완료: {post_url[:60]}")
+            else:
+                _log(f"URL 복사 버튼 클릭했으나 클립보드 값 이상: {clipboard_url[:40] if clipboard_url else '(빈값)'}")
+            driver.switch_to.default_content()
+        except Exception as url_e:
+            _log(f"URL 복사 버튼 클릭 실패: {str(url_e)[:40]}")
+            try:
+                driver.switch_to.default_content()
+            except:
+                pass
+
         return {"ok": True, "url": post_url, "msg": "글쓰기 성공"}
 
     except Exception as e:
@@ -2026,6 +2058,8 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
             error_type = "세션만료"
         elif "no such window" in err_str.lower():
             error_type = "창닫힘"
+        elif "활동정지" in err_str or "활동 정지" in err_str:
+            error_type = "활동정지"
         else:
             error_type = f"예외: {err_str[:40]}"
         return {"ok": False, "url": "", "msg": error_type, "error": error_type}
@@ -2284,8 +2318,13 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
                 time.sleep(delay)
             else:
                 _cleanup_temp_images(processed)
-                _log(f"❌ 글쓰기 실패: {result.get('msg', '')}")
-                result_rows.append({**row_base, "cafe_url": cafe_url, "menu_id": menu_id, "url": "", "deleted": "", "manuscript": ms['name'], "status": "실패", "error": result.get('msg', '')})
+                error_label = "활동정지" if result.get("error") == "suspended" else (result.get('msg', '') or "작성실패")
+                _log(f"❌ 글쓰기 실패: {error_label}")
+                result_rows.append({**row_base, "cafe_url": cafe_url, "menu_id": menu_id, "url": "", "deleted": "", "manuscript": ms['name'], "status": "실패", "error": error_label})
+                # 활동정지면 즉시 종료
+                if result.get("error") == "suspended":
+                    _log("활동정지 감지 — 카페 작업 중단")
+                    return {"ok": False, "msg": "활동정지", "written": written, "result_rows": result_rows, "error": "suspended"}
 
         if write_mode == "글쓰기":
             _log(f"=== 카페 작업 완료: {written}/{post_count}개 작성 ===")
@@ -2347,8 +2386,8 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
                 _log(f"답글 작성 시도: [{article['title'][:30]}] article_id={article['article_id']} 등급={article.get('author_grade', '') or '탈퇴회원'} 닉={article.get('author_nick', '')}")
                 result = write_reply(driver, cafe_url, article["article_id"], reply_title, processed, post_options, reply_tags, _log)
 
-                # 실패 시 1회 재시도
-                if not result.get("ok"):
+                # 실패 시 1회 재시도 (활동정지는 재시도 불필요)
+                if not result.get("ok") and result.get("error") != "suspended":
                     _log(f"❌ 답글 작성 실패 — 1회 재시도")
                     result = write_reply(driver, cafe_url, article["article_id"], reply_title, processed, post_options, reply_tags, _log)
 
@@ -2368,7 +2407,8 @@ def do_cafe_work(driver, account, cafe_grades, settings, log_fn=None):
                     _log(f"❌ 답글 작성 실패 (재시도 포함): article_id={article['article_id']}")
                     _cleanup_temp_images(processed)
                     ms_name = ms['name'] if manuscripts else ""
-                    result_rows.append({**row_base, "cafe_url": cafe_url, "menu_id": menu_id, "url": "", "deleted": "", "manuscript": ms_name, "status": "실패", "error": result.get('error', '') or "작성실패"})
+                    error_label = "활동정지" if result.get("error") == "suspended" else (result.get('error', '') or "작성실패")
+                    result_rows.append({**row_base, "cafe_url": cafe_url, "menu_id": menu_id, "url": "", "deleted": "", "manuscript": ms_name, "status": "실패", "error": error_label})
                     reply_written += 1
                     written += 1
                     # 활동정지면 즉시 종료
