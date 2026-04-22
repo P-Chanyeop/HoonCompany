@@ -1548,6 +1548,19 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
     tags = tags or []
 
     try:
+        # 잔여 탭/팝업 정리 (이전 시도에서 남은 것)
+        while len(driver.window_handles) > 1:
+            try:
+                driver.switch_to.window(driver.window_handles[-1])
+                driver.close()
+            except:
+                break
+        try:
+            driver.switch_to.window(driver.window_handles[0])
+        except:
+            pass
+        _close_file_dialog()
+
         # 게시글 접속
         article_url = f"{cafe_url}?iframe_url=/ArticleRead.nhn%3Farticleid%3D{article_id}"
         _log(f"게시글 접속: article_id={article_id}")
@@ -1647,7 +1660,7 @@ def write_reply(driver, cafe_url, article_id, title, processed_parts, options=No
         if not body_area:
             body_area = driver.find_elements(By.CSS_SELECTOR, "[class*='editor'] [contenteditable], .article_editor")
         if body_area:
-            body_area[0].click()
+            driver.execute_script('arguments[0].click()', body_area[0])
             time.sleep(0.2)
             _log("본문 영역 활성화")
 
@@ -1903,7 +1916,7 @@ def write_post(driver, cafe_url, menu_id, title, processed_parts, options=None, 
         if not body_area:
             body_area = driver.find_elements(By.CSS_SELECTOR, "[class*='editor'] [contenteditable], .article_editor")
         if body_area:
-            body_area[0].click()
+            driver.execute_script('arguments[0].click()', body_area[0])
             time.sleep(0.2)
             _log("본문 영역 활성화")
         else:

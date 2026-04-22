@@ -540,9 +540,14 @@ def _handle_join_questions(driver, _log):
                     _log(f"[서술] Q: {q_text[:50]}... → answer 속성 사용")
                 else:
                     prompt = (
-                        f"네이버 카페 가입 질문에 답변해주세요.\n"
-                        f"질문: {q_text}\n"
-                        f"규칙: 자연스럽고 성의있는 한국어 1~2문장. 답변만 출력."
+                        f"네이버 카페 가입인사를 작성해주세요.\n"
+                        f"카페 안내: {q_text}\n"
+                        f"규칙:\n"
+                        f"- 20~30대 한국인이 실제로 쓸 법한 자연스러운 말투\n"
+                        f"- 이모티콘이나 느낌표 남발하지 말고 편하게\n"
+                        f"- 1~2문장으로 짧게\n"
+                        f"- 가입인사만 출력 (설명, 따옴표 없이)\n"
+                        f"- 예시: 안녕하세요 좋은 정보 얻고 싶어서 가입했어요 잘 부탁드립니다"
                     )
                     resp = model.generate_content(prompt)
                     answer = resp.text.strip()

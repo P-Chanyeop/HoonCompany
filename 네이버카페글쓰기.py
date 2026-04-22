@@ -544,6 +544,7 @@ class LoginWorkerThread(QThread):
                         self.log_signal.emit(f"워커#{worker_idx+1} [실패] [{nid}] {msg}")
                         self.worker_update.emit(worker_idx, f"로그인 실패: {nid}")
                         self.results.append(prot_result or {"ok": False, "msg": msg, "error": "blocked_unknown", "worker": worker_idx, "id": nid})
+                        self._record_login_fail(grp, msg, log_fn)
                         try:
                             driver.quit()
                         except:
@@ -552,6 +553,7 @@ class LoginWorkerThread(QThread):
                 else:
                     self.log_signal.emit(f"워커#{worker_idx+1} [실패] [{nid}] {result['msg']}")
                     self.worker_update.emit(worker_idx, f"로그인 실패: {nid}")
+                    self._record_login_fail(grp, result['msg'], log_fn)
                     try:
                         driver.quit()
                     except:
@@ -561,6 +563,7 @@ class LoginWorkerThread(QThread):
                 self.log_signal.emit(f"워커#{worker_idx+1} [실패] [{nid}] {str(e)[:60]}")
                 self.worker_update.emit(worker_idx, f"에러: {nid}")
                 self.results.append({"ok": False, "msg": str(e)[:60], "error": "exception", "worker": worker_idx, "id": nid})
+                self._record_login_fail(grp, str(e)[:60], log_fn)
                 if driver:
                     try:
                         driver.quit()
@@ -636,6 +639,8 @@ class LoginWorkerThread(QThread):
                         else:
                             self.log_signal.emit(f"워커#{worker_idx+1} [실패] [{nid}] {result['msg']}")
                             self.worker_update.emit(worker_idx, f"로그인 실패: {nid}")
+                            log_fn = lambda msg, _w=worker_idx: self.log_signal.emit(f"  워커#{_w+1} {msg}")
+                            self._record_login_fail(grp, result['msg'], log_fn)
                             try:
                                 drv.quit()
                             except:
@@ -646,6 +651,8 @@ class LoginWorkerThread(QThread):
                         self.log_signal.emit(f"워커#{worker_idx+1} [실패] [{nid}] {str(e)[:60]}")
                         self.worker_update.emit(worker_idx, f"에러: {nid}")
                         self.results.append({"ok": False, "msg": str(e)[:60], "error": "exception", "worker": worker_idx, "id": nid})
+                        log_fn = lambda msg, _w=worker_idx: self.log_signal.emit(f"  워커#{_w+1} {msg}")
+                        self._record_login_fail(grp, str(e)[:60], log_fn)
                         if drv:
                             try:
                                 drv.quit()
@@ -667,6 +674,7 @@ class LoginWorkerThread(QThread):
                         msg = prot_result["msg"] if prot_result else "보호조치 해제 실패"
                         self.log_signal.emit(f"워커#{worker_idx+1} [실패] [{nid}] {msg}")
                         self.worker_update.emit(worker_idx, f"로그인 실패: {nid}")
+                        self._record_login_fail(grp, msg, log_fn)
                         try:
                             drv.quit()
                         except:
@@ -819,6 +827,25 @@ class LoginWorkerThread(QThread):
             cafe_url, task.get("menu_id", ""), url, "", "",
             _dt.now().strftime("%Y-%m-%d %H:%M:%S"), status, error
         ]], sheet_name="결과값", log_fn=log_fn)
+
+    def _record_login_fail(self, grp, error_msg, log_fn):
+        """로그인 실패한 계정의 모든 카페 작업을 결과값에 실패로 기록."""
+        from datetime import datetime as _dt
+        tasks = grp.get("tasks", [])
+        if not tasks:
+            tasks = [{"cafe_url": "", "menu_id": ""}]
+        rows = []
+        for task in tasks:
+            for _ in range(task.get("post_count", 1)):
+                rows.append([
+                    grp.get("id", ""), grp.get("pw", ""), grp.get("name", ""),
+                    grp.get("birth", ""), grp.get("gender", ""),
+                    task.get("cafe_url", ""), task.get("menu_id", ""),
+                    "", "", "",
+                    _dt.now().strftime("%Y-%m-%d %H:%M:%S"), "실패", error_msg
+                ])
+        if rows:
+            func.append_to_gsheet_with_color(rows, sheet_name="결과값", log_fn=log_fn)
 
     def _record_work_rows(self, worker_idx, nid, cafe_short, work_result, log_fn):
         rows = work_result.get("result_rows", [])
